@@ -36,7 +36,7 @@ class WatchPartyServer:
         self.banned_users = set()
         
     def _broadcast(self, message, exclude_ws=None):
-        out_msg = json.dumps(message)
+        out_msg = json.dumps(message, ensure_ascii=False)
         for ws in list(self.clients.keys()):
             if ws != exclude_ws:
                 # Don't send chat or sync to deafened users, except admin messages
@@ -90,7 +90,9 @@ class WatchPartyServer:
 
             # Block banned users
             if client_name in self.banned_users:
-                await websocket.send(json.dumps({"type": "error", "message": "You are banned from this room."}))
+                await websocket.send(
+                    json.dumps({"type": "error", "message": "You are banned from this room."}, ensure_ascii=False)
+                )
                 await websocket.close(1008, "Banned")
                 return
 
@@ -121,11 +123,16 @@ class WatchPartyServer:
             self.clients[websocket] = {'name': client_name}
             
             # Send initial state
-            await websocket.send(json.dumps({
-                "type": "room_state",
-                "room_name": self.room_name,
-                "playback": self.playback_state
-            }))
+            await websocket.send(
+                json.dumps(
+                    {
+                        "type": "room_state",
+                        "room_name": self.room_name,
+                        "playback": self.playback_state,
+                    },
+                    ensure_ascii=False,
+                )
+            )
             
             self._broadcast({"type": "system", "message": f"{client_name} joined the room."})
             self._broadcast_user_list()
@@ -142,7 +149,9 @@ class WatchPartyServer:
                 
                 if msg_type == "chat":
                     if user_info['muted']:
-                        await websocket.send(json.dumps({"type": "error", "message": "You are muted."}))
+                        await websocket.send(
+                            json.dumps({"type": "error", "message": "You are muted."}, ensure_ascii=False)
+                        )
                         continue
                     
                     self._broadcast({
@@ -184,14 +193,24 @@ class WatchPartyServer:
                     
                     if action == "kick":
                         if target_info['ws']:
-                            await target_info['ws'].send(json.dumps({"type": "kicked", "message": "You have been kicked by the host."}))
+                            await target_info['ws'].send(
+                                json.dumps(
+                                    {"type": "kicked", "message": "You have been kicked by the host."},
+                                    ensure_ascii=False,
+                                )
+                            )
                             await target_info['ws'].close()
                         self._broadcast({"type": "system", "message": f"{target} was kicked."})
                         
                     elif action == "ban":
                         self.banned_users.add(target)
                         if target_info['ws']:
-                            await target_info['ws'].send(json.dumps({"type": "kicked", "message": "You have been banned by the host."}))
+                            await target_info['ws'].send(
+                                json.dumps(
+                                    {"type": "kicked", "message": "You have been banned by the host."},
+                                    ensure_ascii=False,
+                                )
+                            )
                             await target_info['ws'].close()
                         self._broadcast({"type": "system", "message": f"{target} was banned."})
                     
@@ -201,7 +220,12 @@ class WatchPartyServer:
                             self._broadcast({"type": "system", "message": f"{target} was unbanned."})
                         else:
                             if self.host_name in self.users and self.users[self.host_name]['ws']:
-                                await self.users[self.host_name]['ws'].send(json.dumps({"type": "system", "message": f"{target} is not banned."}))
+                                await self.users[self.host_name]['ws'].send(
+                                    json.dumps(
+                                        {"type": "system", "message": f"{target} is not banned."},
+                                        ensure_ascii=False,
+                                    )
+                                )
                         
                     elif action == "mute":
                         target_info['muted'] = not target_info['muted']

@@ -12,6 +12,7 @@ from rich.panel import Panel
 from rich.live import Live
 from rich.text import Text
 from rich.align import Align
+from rich.markup import escape
 from utils.os_detector import IS_WINDOWS
 
 console = Console()
@@ -92,7 +93,9 @@ class PartyClient:
             self.ws = await websockets.connect(self.ws_url, **connect_kwargs)
             
             # Join as member
-            await self.ws.send(json.dumps({"type": "join", "name": self.username, "role": "member"}))
+            await self.ws.send(
+                json.dumps({"type": "join", "name": self.username, "role": "member"}, ensure_ascii=False)
+            )
             
             # Message loop
             async for message_str in self.ws:
@@ -131,13 +134,15 @@ class PartyClient:
                         # Local filter: skip if we locally muted or deafened this user
                         if sender in self.local_muted or sender in self.local_deafened:
                             continue
-                        self.chat_history.append(f"[bold cyan]{sender}:[/bold cyan] {msg}")
+                        self.chat_history.append(
+                            f"[bold cyan]{escape(sender)}:[/bold cyan] {escape(msg)}"
+                        )
                         if sender != self.username:
                             self._play_notification()
                         
                     elif mt == "system":
                         msg = data.get("message", "")
-                        self.chat_history.append(f"[dim italic]{msg}[/dim italic]")
+                        self.chat_history.append(f"[dim italic]{escape(msg)}[/dim italic]")
                         
                     elif mt == "sync":
                         playback = data.get("playback", {})
@@ -167,7 +172,9 @@ class PartyClient:
                         self.running = False
                         
                     elif mt == "error":
-                        self.chat_history.append(f"[bold red]Error:[/bold red] {data.get('message')}")
+                        self.chat_history.append(
+                            f"[bold red]Error:[/bold red] {escape(data.get('message', ''))}"
+                        )
                         
                     if len(self.chat_history) > 100:
                         self.chat_history = self.chat_history[-100:]
@@ -322,7 +329,12 @@ class PartyClient:
                             if self.input_text.startswith('/'):
                                 self._handle_local_command(self.input_text)
                             elif self.ws:
-                                await self.ws.send(json.dumps({"type": "chat", "message": self.input_text}))
+                                await self.ws.send(
+                                    json.dumps(
+                                        {"type": "chat", "message": self.input_text},
+                                        ensure_ascii=False,
+                                    )
+                                )
                             self.input_text = ""
                     else:
                         if c.isprintable():

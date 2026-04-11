@@ -975,6 +975,11 @@ def main():
     
     # ── Main Loop (shared by Solo and Party Host) ──
     while True:
+        if party_active and party_proc and party_proc.poll() is not None:
+            console.print("[yellow]Party session ended. Returning to home menu...[/yellow]")
+            time.sleep(1)
+            return main()
+
         console.print()
         console.clear()
         

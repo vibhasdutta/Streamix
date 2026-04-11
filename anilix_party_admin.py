@@ -11,6 +11,7 @@ from rich.table import Table
 from rich.live import Live
 from rich.text import Text
 from rich.align import Align
+from rich.markup import escape
 from utils.os_detector import IS_WINDOWS
 
 console = Console()
@@ -105,16 +106,20 @@ class PartyAdminTUI:
                         # Local filter: skip if admin locally muted/deafened this user
                         if sender in self.local_muted or sender in self.local_deafened:
                             continue
-                        self.chat_history.append(f"[bold cyan]{sender}:[/bold cyan] {msg}")
+                        self.chat_history.append(
+                            f"[bold cyan]{escape(sender)}:[/bold cyan] {escape(msg)}"
+                        )
                         if sender != self.username:
                             self._play_notification()
                     elif mt == "system":
                         msg = data.get("message", "")
-                        self.chat_history.append(f"[dim italic]{msg}[/dim italic]")
+                        self.chat_history.append(f"[dim italic]{escape(msg)}[/dim italic]")
                         self.system_messages.append(msg)
                     elif mt == "error":
                         msg = data.get("message", "")
-                        self.chat_history.append(f"[bold red]System Error:[/bold red] {msg}")
+                        self.chat_history.append(
+                            f"[bold red]System Error:[/bold red] {escape(msg)}"
+                        )
                         
                     # Keep history manageable
                     if len(self.chat_history) > 100:
@@ -150,7 +155,7 @@ class PartyAdminTUI:
                 "type": "admin",
                 "action": action[1:],  # Remove slash
                 "target": target
-            }))
+            }, ensure_ascii=False))
         # Local volume control
         elif action == "/vol":
             try:
@@ -220,7 +225,7 @@ class PartyAdminTUI:
             await self.ws.send(json.dumps({
                 "type": "chat",
                 "message": msg
-            }))
+            }, ensure_ascii=False))
 
     def generate_layout(self):
         from rich import box
@@ -386,7 +391,7 @@ class PartyAdminTUI:
                     }
                     if current_url: payload["url"] = current_url
                     if current_title: payload["anime_title"] = current_title
-                    await self.ws.send(json.dumps(payload))
+                    await self.ws.send(json.dumps(payload, ensure_ascii=False))
                     
             except Exception:
                 pass
