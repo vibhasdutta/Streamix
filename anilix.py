@@ -169,6 +169,47 @@ def stop_backend():
         except Exception:
             pass
 
+def _open_in_new_terminal(script_name, args, title="Anilix"):
+    """Open a Python script in a new terminal window. Works on macOS, Windows, and Linux."""
+    py = sys.executable
+    script = os.path.abspath(script_name)
+    
+    current_os = platform.system()
+    proc = None
+    
+    if current_os == "Windows":
+        # Windows: open a new cmd window
+        args_str = ' '.join(f'\"{a}\"' for a in args)
+        cmd = f'start "{title}" cmd /c "\"{py}\" \"{script}\" {args_str}"'
+        proc = subprocess.Popen(cmd, shell=True)
+        
+    elif current_os == "Darwin":
+        # macOS: open a new Terminal.app window via AppleScript
+        # Build shell command with proper quoting
+        parts = [f"\\\"{ py}\\\"", f"\\\"{script}\\\""]
+        for a in args:
+            parts.append(f"\\\"{a}\\\"")
+        shell_cmd = " ".join(parts) + "; exit"
+        applescript = f'tell application "Terminal" to do script "{shell_cmd}"'
+        proc = subprocess.Popen(["osascript", "-e", applescript])
+        
+    else:
+        # Linux: try common terminal emulators
+        term = (shutil.which("x-terminal-emulator") or 
+                shutil.which("gnome-terminal") or 
+                shutil.which("konsole") or 
+                shutil.which("alacritty") or 
+                shutil.which("xterm"))
+        if term:
+            cmd_args = [term, "-e", py, script] + list(args)
+            proc = subprocess.Popen(cmd_args)
+        else:
+            console.print("[red]Could not find a suitable terminal emulator![/red]")
+    
+    if proc:
+        active_subprocesses.append(proc)
+    return proc
+
 def start_backend():
     global backend_process
     # Check if a server is already running on 8000
@@ -840,13 +881,10 @@ def main():
             if not username:
                 username = f"Guest_{int(time.time())%1000}"
             
-            console.print("[yellow]Joining Party Room...[/yellow]")
-            try:
-                subprocess.run([sys.executable, "anilix_party_client.py", party_url, username])
-            except KeyboardInterrupt:
-                pass
-            
-            # Automatically returns to main menu when client disconnects or party ends
+            console.print("[yellow]Connecting... a new window will open for chat.[/yellow]")
+            _open_in_new_terminal("anilix_party_client.py", [party_url, username], title="Anilix Client")
+            console.print("[bold green]✅ Client window launched![/bold green]")
+            input("Press Enter to return to menu...")
             return main()
         
         if party_choice == "host":
@@ -883,25 +921,7 @@ def main():
                     console.print(f"\n[bold green]✅ Party ready! Share this link with friends:[/bold green]")
                     console.print(Align.center(Panel.fit(f"[bold yellow]{info['url']}[/bold yellow]", border_style="green", box=box.ROUNDED)))
                 
-                if os.name == 'nt':
-                    py = sys.executable
-                    script = os.path.abspath("anilix_party_admin.py")
-                    admin_proc = subprocess.Popen(
-                        f'start "Anilix Admin" cmd /c "\"{py}\" \"{script}\" \"{host_name}\" \"{ipc_server_path or ""}\""',
-                        shell=True
-                    )
-                elif sys.platform == "darwin":
-                    script_cmd = f'"{sys.executable}" "{os.path.abspath("anilix_party_admin.py")}" "{host_name}" "{ipc_server_path or ""}"; exit'
-                    escaped_script = script_cmd.replace('"', '\\"')
-                    admin_proc = subprocess.Popen(["osascript", "-e", f'tell application "Terminal" to do script "{escaped_script}"'])
-                else:
-                    import shutil
-                    term = shutil.which("x-terminal-emulator") or shutil.which("gnome-terminal") or shutil.which("konsole") or shutil.which("alacritty") or shutil.which("xterm")
-                    if term:
-                        admin_proc = subprocess.Popen([term, "-e", sys.executable, "anilix_party_admin.py", host_name, ipc_server_path or ""])
-                    else:
-                        console.print("[red]Could not find a suitable terminal emulator![/red]")
-                active_subprocesses.append(admin_proc)
+                _open_in_new_terminal("anilix_party_admin.py", [host_name, ipc_server_path or ""], title="Anilix Admin")
                 
                 console.print("[dim]Admin console opened in a new window.[/dim]")
                 party_active = True
