@@ -1100,20 +1100,28 @@ def main():
             is_live_stream = (sub_choice == "live")
                 
             if sub_choice == "local":
-                import tkinter as tk
-                from tkinter import filedialog
-                
-                # Hide the main tkinter window
-                root = tk.Tk()
-                root.attributes("-topmost", True)
-                root.withdraw()
-                
-                custom_path = filedialog.askopenfilename(
-                    title="Select Video File",
-                    filetypes=[("Video Files", "*.mp4 *.mkv *.avi *.webm *.mov"), ("All Files", "*.*")]
-                )
-                
-                root.destroy()
+                if IS_MACOS:
+                    try:
+                        result = subprocess.run(
+                            ['osascript', '-e', 'POSIX path of (choose file with prompt "Select Video File")'],
+                            capture_output=True, text=True
+                        )
+                        custom_path = result.stdout.strip()
+                    except Exception:
+                        custom_path = ""
+                else:
+                    import tkinter as tk
+                    from tkinter import filedialog
+                    
+                    root = tk.Tk()
+                    root.attributes("-topmost", True)
+                    root.withdraw()
+                    
+                    custom_path = filedialog.askopenfilename(
+                        title="Select Video File",
+                        filetypes=[("Video Files", "*.mp4 *.mkv *.avi *.webm *.mov"), ("All Files", "*.*")]
+                    )
+                    root.destroy()
                 
                 if not custom_path:
                     continue
@@ -1124,6 +1132,9 @@ def main():
                     continue
                 
             clean_path = custom_path.strip("\"'")
+            if sub_choice in ["link", "live"] and not clean_path.startswith("http"):
+                clean_path = "https://" + clean_path
+                
             is_url = clean_path.startswith("http://") or clean_path.startswith("https://")
             
             if not is_url and not os.path.exists(clean_path):

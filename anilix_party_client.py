@@ -63,6 +63,25 @@ class PartyClient:
         except Exception:
             pass
 
+    def _get_mpv_property_sync(self, prop):
+        """Synchronously request a property from mpv via IPC."""
+        try:
+            if IS_WINDOWS:
+                with open(self.mpv_ipc_path, 'r+') as f:
+                    f.write(json.dumps({"command": ["get_property", prop]}) + "\n")
+                    f.flush()
+                    res = json.loads(f.readline())
+                    return res.get("data")
+            else:
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.connect(self.mpv_ipc_path)
+                s.sendall((json.dumps({"command": ["get_property", prop]}) + "\n").encode())
+                res = json.loads(s.recv(1024).decode().split('\n')[0])
+                s.close()
+                return res.get("data")
+        except Exception:
+            return None
+
     def _play_notification(self):
         if not self.notifications_enabled:
             return
@@ -168,8 +187,12 @@ class PartyClient:
                                 await asyncio.sleep(1) # wait for mpv IPC
                                 
                             # Sync mpv (sync is never locally filtered — host controls playback)
-                            await self._send_mpv_command(["set_property", "time-pos", timestamp])
                             await self._send_mpv_command(["set_property", "pause", state == "paused"])
+                            client_time = await asyncio.to_thread(self._get_mpv_property_sync, "time-pos")
+                            
+                            # Only seek if we're out of sync by more than 2 seconds to avoid stuttering/frame drops
+                            if client_time is None or abs(client_time - timestamp) > 2.0:
+                                await self._send_mpv_command(["set_property", "time-pos", timestamp])
                             
                     elif mt == "kicked":
                         self.chat_history.append(f"[bold red]You have been kicked from the party.[/bold red]")
@@ -395,7 +418,11 @@ class PartyClient:
             input_handler.cleanup()
             # Kill mpv if still running (no point playing without sync)
             if getattr(self, 'mpv_process', None):
+                try: await self._send_mpv_command(["quit"])
+                except: pass
                 try: self.mpv_process.terminate()
+                except: pass
+                try: self.mpv_process.kill()
                 except: pass
             # Close WebSocket gracefully
             if self.ws:
