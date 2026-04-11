@@ -265,7 +265,7 @@ class PartyClient:
         user_table.add_column("Status")
         user_table.add_column("Name")
         for u in self.users:
-            icon = "⭐" if u.get('role') == 'host' else "🟢" if u.get('online') else "🔴"
+            icon = "👑" if u.get('role') == 'host' else "🟢" if u.get('online') else "🔴"
             name = u.get('name', '?')
             flags = []
             if name in self.local_muted: flags.append("🔇")
@@ -275,7 +275,9 @@ class PartyClient:
         layout["users"].update(Panel(user_table, title="Users", border_style="cyan"))
         
         # Chat panel
-        chat_content = "\n".join(self.chat_history)
+        import shutil
+        max_lines = max(5, shutil.get_terminal_size().lines - 15)
+        chat_content = "\n".join(self.chat_history[-max_lines:])
         layout["chat"].update(Panel(Text.from_markup(chat_content), title="Chat", border_style="blue"))
         
         input_panel = Panel(f"> {self.input_text}█", border_style="green", title="Message (/help for commands)")
@@ -323,11 +325,13 @@ class PartyClient:
                         last_state = current_state
                     await asyncio.sleep(0.05)
                     if self.mpv_process and self.mpv_process.poll() is not None:
-                        # mpv closed
-                        self.chat_history.append("[dim]Video player closed. You are still in chat.[/dim]")
-                        self.mpv_process = None
+                        # mpv closed manually by user
+                        self.running = False
         finally:
             input_handler.cleanup()
+            if getattr(self, 'mpv_process', None):
+                try: self.mpv_process.terminate()
+                except: pass
 
 if __name__ == "__main__":
     import sys

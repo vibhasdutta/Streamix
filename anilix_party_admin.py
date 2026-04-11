@@ -243,13 +243,10 @@ class PartyAdminTUI:
         user_table.add_column("IP", style="dim")
         
         for u in self.users:
-            status = ""
             if u.get('role') == 'host':
-                status += "⭐ "
-            if u.get('online'):
-                status += "🟢"
+                status = "👑"
             else:
-                status += "🔴"
+                status = "🟢" if u.get('online') else "🔴"
                 
             name = u.get("name", "Unknown")
             ip = u.get("ip", "")
@@ -269,7 +266,9 @@ class PartyAdminTUI:
         layout["users"].update(Panel(user_table, title="Users", border_style="cyan"))
         
         # Chat
-        chat_content = "\n".join(self.chat_history)
+        import shutil
+        max_lines = max(5, shutil.get_terminal_size().lines - 15)
+        chat_content = "\n".join(self.chat_history[-max_lines:])
         layout["chat"].update(Panel(Text.from_markup(chat_content), title="Chat & Activity", border_style="blue"))
         
         # Input
