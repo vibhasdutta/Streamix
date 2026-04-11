@@ -429,19 +429,29 @@ def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=Fal
         args.append(url)
         
         try:
-            mpv_process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            
-            while mpv_process.poll() is None:
-                time.sleep(0.3)
-                # If party server unexpectedly dies (e.g. host clicked X), abort playback immediately
-                if ipc_server and party_proc and party_proc.poll() is not None:
-                    mpv_process.terminate()
-                    break
+            if ipc_server and party_proc:
+                # Party mode: need to monitor party_proc death to auto-kill MPV
+                import threading
+                mpv_process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                
+                def _party_watchdog():
+                    """Kill MPV if the party server dies while video is playing."""
+                    while mpv_process.poll() is None:
+                        if party_proc.poll() is not None:
+                            try: mpv_process.kill()
+                            except: pass
+                            return
+                        time.sleep(0.5)
+                
+                watcher = threading.Thread(target=_party_watchdog, daemon=True)
+                watcher.start()
+                mpv_process.wait()  # Block until MPV actually exits
+            else:
+                # Solo mode: simple blocking call — most reliable
+                subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             
             return True
         except KeyboardInterrupt:
-            try: mpv_process.terminate()
-            except: pass
             return True
         except Exception as e:
             console.print(f"[bold red]❌ mpv failed to launch:[/bold red] {e}")
@@ -1202,7 +1212,7 @@ def main():
             with status_after("[yellow]▶️ Preparing playback...[/yellow]", center=True):
                 time.sleep(0.5)
             
-            play_video(clean_path, anime_title="Custom Playback", episode_num="", is_custom=True, is_live=is_live_stream, quality=selected_quality)
+            play_video(clean_path, anime_title="Custom Playback", episode_num="", is_custom=True, is_live=is_live_stream, quality=selected_quality, ipc_server=ipc_server_path)
             
         elif choice == 'search':
             # Search with History helper
