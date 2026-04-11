@@ -52,6 +52,66 @@ chmod +x setup.sh
 - `anilix_server.py`: FastAPI backend.
 - `recent_watch.json`: Persistent history database.
 
+## 🖥️ Runtime OS Detection Utility
+
+Anilix includes a singleton-style OS detector module that resolves the OS once
+at import time and exposes enum values, booleans, and raw platform metadata.
+
+```python
+from utils.os_detector import IS_MACOS, IS_WINDOWS, current_os, OS
+
+if current_os is OS.WINDOWS:
+  print("Windows-specific logic")
+elif current_os is OS.MACOS:
+  print("macOS-specific logic")
+elif current_os is OS.LINUX:
+  print("Linux-specific logic")
+```
+
+Boolean flags are available for quick guards:
+
+```python
+from utils.os_detector import IS_LINUX, IS_MACOS, IS_WINDOWS
+
+if IS_WINDOWS:
+  use_windows_pipe()
+elif IS_MACOS:
+  use_pbcopy_clipboard()
+elif IS_LINUX:
+  use_xclip_or_wlcopy()
+```
+
+Callable accessor alternative:
+
+```python
+from utils.os_detector import get_os, OS
+
+if get_os() is OS.LINUX:
+  print("Running on Linux")
+```
+
+Raw values for logging/debugging:
+
+```python
+from utils.os_detector import RAW_OS_NAME, RAW_OS_RELEASE, RAW_OS_VERSION
+
+print(f"OS={RAW_OS_NAME} release={RAW_OS_RELEASE} version={RAW_OS_VERSION}")
+```
+
+Optional startup integration in an entry point:
+
+```python
+from utils.os_detector import RAW_OS_NAME, RAW_OS_RELEASE, RAW_OS_VERSION, current_os
+
+def main() -> None:
+  print(
+    f"Detected OS: {current_os.value} | "
+    f"raw={RAW_OS_NAME} {RAW_OS_RELEASE} | "
+    f"version={RAW_OS_VERSION}"
+  )
+  # Continue startup...
+```
+
 ## 📈 Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=VibhasDutta/anilix&type=Date)](https://star-history.com/#VibhasDutta/anilix&Date)

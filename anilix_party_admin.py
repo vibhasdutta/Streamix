@@ -11,6 +11,7 @@ from rich.table import Table
 from rich.live import Live
 from rich.text import Text
 from rich.align import Align
+from utils.os_detector import IS_WINDOWS
 
 console = Console()
 
@@ -68,7 +69,7 @@ class PartyAdminTUI:
             if not self.ipc_path:
                 return
             import socket
-            if os.name == 'nt':
+            if IS_WINDOWS:
                 with open(self.ipc_path, "w") as f:
                     f.write(json.dumps({"command": command}) + "\n")
             else:
@@ -328,7 +329,7 @@ class PartyAdminTUI:
                     import json
                     nonlocal pause_state, time_pos, current_url, current_title
                     try:
-                        if os.name == 'nt':
+                        if IS_WINDOWS:
                             # Read win32 pipe
                             with open(self.ipc_path, 'r+') as f:
                                 f.write(json.dumps({"command": ["get_property", "pause"]}) + "\n")
@@ -424,7 +425,7 @@ class PartyAdminTUI:
             if self.ipc_path:
                 try:
                     import socket, json
-                    if os.name == 'nt':
+                    if IS_WINDOWS:
                         with open(self.ipc_path, 'r+') as f:
                             f.write(json.dumps({"command": ["quit"]}) + "\n")
                             f.flush()

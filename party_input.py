@@ -1,9 +1,9 @@
 import sys
-import os
+from utils.os_detector import IS_WINDOWS
 
 class NonBlockingInput:
     def __init__(self):
-        self.is_windows = (os.name == 'nt')
+        self.is_windows = IS_WINDOWS
         self.fd = None
         self.old_settings = None
         

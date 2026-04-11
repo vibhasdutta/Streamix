@@ -4,7 +4,6 @@ import json
 import time
 import sys
 import subprocess
-import platform
 import atexit
 import shutil
 import hashlib
@@ -23,6 +22,15 @@ from rich.columns import Columns
 from rich import box
 import questionary
 from contextlib import contextmanager
+from utils.os_detector import (
+    IS_MACOS,
+    IS_WINDOWS,
+    OS,
+    RAW_OS_NAME,
+    RAW_OS_RELEASE,
+    RAW_OS_VERSION,
+    current_os,
+)
 
 API_BASE = "http://localhost:8000"
 JSON_DIR = Path(".json")
@@ -118,7 +126,7 @@ def stop_backend():
     # Kill anilix_party Python processes and ngrok
     try:
         import signal
-        if os.name == 'nt':
+        if IS_WINDOWS:
             # Use taskkill but catch any issues
             subprocess.run(["taskkill", "/F", "/IM", "ngrok.exe", "/T"], 
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -133,7 +141,7 @@ def stop_backend():
         pass
     
     # Give Terminal windows a moment to close via '; exit', then force-close stragglers
-    if sys.platform == "darwin":
+    if IS_MACOS:
         try:
             time.sleep(0.5)
             # Close any Terminal windows where the shell has already exited
@@ -165,7 +173,7 @@ def stop_backend():
         pass
     
     # Cleanup any leftover IPC socket files (Unix only)
-    if os.name != 'nt':
+    if not IS_WINDOWS:
         try:
             import glob
             for sock in glob.glob("/tmp/anilix_*.sock"):
@@ -178,17 +186,16 @@ def _open_in_new_terminal(script_name, args, title="Anilix"):
     """Open a Python script in a new terminal window. Works on macOS, Windows, and Linux."""
     py = sys.executable
     script = os.path.abspath(script_name)
-    
-    current_os = platform.system()
+
     proc = None
-    
-    if current_os == "Windows":
+
+    if current_os is OS.WINDOWS:
         # Windows: open a new cmd window
         args_str = ' '.join(f'\"{a}\"' for a in args)
         cmd = f'start "{title}" cmd /c "\"{py}\" \"{script}\" {args_str}"'
         proc = subprocess.Popen(cmd, shell=True)
-        
-    elif current_os == "Darwin":
+
+    elif current_os is OS.MACOS:
         # macOS: open a new Terminal.app window via AppleScript
         script_cmd = f'"{py}" "{script}"'
         if args:
@@ -311,7 +318,6 @@ def get_mpv_path():
 def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=False, is_live=False, quality=None, ipc_server=None):
     """Platform-aware video playback using mpv exclusively.
     """
-    current_os = platform.system()
     mpv_path = get_mpv_path()
 
     # ── Log Playback ──
@@ -749,8 +755,8 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None,
                     
                     if auto_play:
                         console.print(f"\n[bold green]✅ Episode Finished[/bold green]")
-                        
-                        is_windows = platform.system() == "Windows"
+
+                        is_windows = IS_WINDOWS
                         should_play = False
                         
                         if is_windows:
@@ -833,6 +839,9 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None,
 
 def main():
     start_backend()
+    console.print(
+        f"[dim]Detected OS: {current_os.value} | raw={RAW_OS_NAME} {RAW_OS_RELEASE} | version={RAW_OS_VERSION}[/dim]"
+    )
     search_history = []
     
     # ── Mode Selection ──
@@ -904,7 +913,7 @@ def main():
         if party_choice == "host":
             import uuid
             uid = str(uuid.uuid4())[:8]
-            ipc_server_path = fr"\\.\pipe\anilix_host_{uid}" if os.name == 'nt' else f"/tmp/anilix_host_{uid}.sock"
+            ipc_server_path = fr"\\.\pipe\anilix_host_{uid}" if IS_WINDOWS else f"/tmp/anilix_host_{uid}.sock"
             
             room_name = questionary.text("Room Name:", default=f"{os.getlogin()}'s Party").ask()
             host_name = questionary.text("Your Host Name:", default="Host").ask()
@@ -937,9 +946,9 @@ def main():
                     
                     # Auto-copy URL to clipboard based on OS natively
                     try:
-                        if os.name == 'nt':
+                        if IS_WINDOWS:
                             subprocess.run(['clip'], input=info['url'].encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        elif sys.platform == 'darwin':
+                        elif IS_MACOS:
                             subprocess.run(['pbcopy'], input=info['url'].encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                         else:
                             import shutil

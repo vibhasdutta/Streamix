@@ -12,6 +12,7 @@ from rich.panel import Panel
 from rich.live import Live
 from rich.text import Text
 from rich.align import Align
+from utils.os_detector import IS_WINDOWS
 
 console = Console()
 
@@ -27,7 +28,7 @@ class PartyClient:
         self.users = []
         self.input_text = ""
         self.mpv_process = None
-        self.mpv_ipc_path = fr"\\.\pipe\anilix_client_{int(time.time())}" if os.name == 'nt' else f"/tmp/anilix_client_{int(time.time())}.sock"
+        self.mpv_ipc_path = fr"\\.\pipe\anilix_client_{int(time.time())}" if IS_WINDOWS else f"/tmp/anilix_client_{int(time.time())}.sock"
         
         # Local-only filters (only affect this user's view)
         self.local_muted = set()
@@ -44,7 +45,7 @@ class PartyClient:
     async def _send_mpv_command(self, command):
         """Sends an IPC command to mpv if it's running."""
         try:
-            if os.name == 'nt':
+            if IS_WINDOWS:
                 with open(self.mpv_ipc_path, "w") as f:
                     f.write(json.dumps({"command": command}) + "\n")
             else:

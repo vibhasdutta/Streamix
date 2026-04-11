@@ -4,6 +4,7 @@ import logging
 import time
 from pyngrok import ngrok
 import websockets
+from utils.os_detector import IS_WINDOWS
 
 logging.basicConfig(level=logging.ERROR)
 
@@ -277,7 +278,7 @@ def start_server_and_tunnel(room_name, host_name, max_users=10, port=9000):
     
     # Aggressive cleanup of any zombie ngrok processes before starting
     import os
-    if os.name == 'nt':
+    if IS_WINDOWS:
         os.system("taskkill /F /IM ngrok.exe /T >nul 2>&1")
     else:
         os.system("pkill -9 ngrok >/dev/null 2>&1")
