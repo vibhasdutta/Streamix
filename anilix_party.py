@@ -222,10 +222,17 @@ class WatchPartyServer:
             if websocket in self.clients:
                 del self.clients[websocket]
             if client_name and client_name in self.users:
+                role = self.users[client_name].get('role')
                 self.users[client_name]['online'] = False
                 self.users[client_name]['ws'] = None
                 self._broadcast({"type": "system", "message": f"{client_name} left the room."})
                 self._broadcast_user_list()
+                
+                # If host leaves, completely terminate the server thereby disconnecting everyone
+                if role == 'host':
+                    logger.info("Host disconnected. Shutting down global server.")
+                    import os
+                    os._exit(0)
 
 import logging
 import traceback

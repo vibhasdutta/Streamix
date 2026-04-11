@@ -347,13 +347,19 @@ def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=Fal
         args.append(url)
         
         try:
-            # Use run() to track end of playback
-            # We don't suppress stderr anymore to help debugging if it fails
-            result = subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-            if result.returncode != 0:
-                console.print(f"[bold red]❌ mpv exited with error code {result.returncode}[/bold red]")
-                if result.stderr:
-                    console.print(f"[dim]Error: {result.stderr.strip()}[/dim]")
+            global party_proc
+            mpv_process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+            
+            while mpv_process.poll() is None:
+                time.sleep(0.5)
+                # If party server unexpectedly dies (e.g. host clicked X), abort playback immediately
+                if ipc_server and party_proc and party_proc.poll() is not None:
+                    mpv_process.terminate()
+                    break
+            
+            return True
+        except KeyboardInterrupt:
+            mpv_process.terminate()
             return True
         except Exception as e:
             console.print(f"[bold red]❌ mpv failed to launch:[/bold red] {e}")
@@ -920,6 +926,23 @@ def main():
                     info = json.load(f)
                     console.print(f"\n[bold green]✅ Party ready! Share this link with friends:[/bold green]")
                     console.print(Align.center(Panel.fit(f"[bold yellow]{info['url']}[/bold yellow]", border_style="green", box=box.ROUNDED)))
+                    
+                    # Auto-copy URL to clipboard based on OS natively
+                    try:
+                        import subprocess
+                        if os.name == 'nt':
+                            subprocess.run(['clip'], input=info['url'].encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        elif sys.platform == 'darwin':
+                            subprocess.run(['pbcopy'], input=info['url'].encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        else:
+                            import shutil
+                            if shutil.which('xclip'):
+                                subprocess.run(['xclip', '-selection', 'clipboard'], input=info['url'].encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            elif shutil.which('Wayland'):
+                                subprocess.run(['wl-copy'], input=info['url'].encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        console.print(Align.center("[dim italic](Link automatically copied to your clipboard!)[/dim italic]"))
+                    except BaseException:
+                        pass
                 
                 _open_in_new_terminal("anilix_party_admin.py", [host_name, ipc_server_path or ""], title="Anilix Admin")
                 
