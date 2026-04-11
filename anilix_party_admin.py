@@ -116,8 +116,8 @@ class PartyAdminTUI:
                         self.chat_history.append(f"[bold red]System Error:[/bold red] {msg}")
                         
                     # Keep history manageable
-                    if len(self.chat_history) > 20:
-                        self.chat_history = self.chat_history[-20:]
+                    if len(self.chat_history) > 100:
+                        self.chat_history = self.chat_history[-100:]
                         
                 except Exception as e:
                     self.chat_history.append(f"[red]Error parsing message: {e}[/red]")

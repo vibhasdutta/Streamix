@@ -33,6 +33,7 @@ CACHE_DIR = Path(".cache")
 CACHE_DIR.mkdir(exist_ok=True)
 console = Console()
 backend_process = None
+party_proc = None
 active_subprocesses = []
 
 def fetch_json(url, params=None, ttl_hours=24):
@@ -114,16 +115,20 @@ def stop_backend():
                 pass
     active_subprocesses.clear()
             
-    # Kill anilix_party Python processes (the actual scripts running in Terminal windows)
-    # This triggers '; exit' to auto-close the Terminal windows
+    # Kill anilix_party Python processes and ngrok
     try:
+        import signal
         if os.name == 'nt':
-            os.system("taskkill /F /IM ngrok.exe /T >nul 2>&1")
+            # Use taskkill but catch any issues
+            subprocess.run(["taskkill", "/F", "/IM", "ngrok.exe", "/T"], 
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:
-            os.system("pkill -f anilix_party_admin.py >/dev/null 2>&1")
-            os.system("pkill -f anilix_party_client.py >/dev/null 2>&1")
-            os.system("pkill -f anilix_party.py >/dev/null 2>&1")
-            os.system("pkill -9 ngrok >/dev/null 2>&1")
+            # Unix-like cleanup
+            # pkill returns non-zero if no process found, so ignore errors
+            subprocess.run(["pkill", "-f", "anilix_party_admin.py"], stderr=subprocess.DEVNULL)
+            subprocess.run(["pkill", "-f", "anilix_party_client.py"], stderr=subprocess.DEVNULL)
+            subprocess.run(["pkill", "-f", "anilix_party.py"], stderr=subprocess.DEVNULL)
+            subprocess.run(["pkill", "-9", "ngrok"], stderr=subprocess.DEVNULL)
     except Exception:
         pass
     
@@ -185,12 +190,14 @@ def _open_in_new_terminal(script_name, args, title="Anilix"):
         
     elif current_os == "Darwin":
         # macOS: open a new Terminal.app window via AppleScript
-        # Build shell command with proper quoting
-        parts = [f"\\\"{ py}\\\"", f"\\\"{script}\\\""]
-        for a in args:
-            parts.append(f"\\\"{a}\\\"")
-        shell_cmd = " ".join(parts) + "; exit"
-        applescript = f'tell application "Terminal" to do script "{shell_cmd}"'
+        script_cmd = f'"{py}" "{script}"'
+        if args:
+            script_cmd += " " + " ".join(f'"{a}"' for a in args)
+        script_cmd += "; exit"
+        
+        # Proper escaping for AppleScript "do script"
+        escaped_script = script_cmd.replace('"', '\\"')
+        applescript = f'tell application "Terminal" to do script "{escaped_script}"'
         proc = subprocess.Popen(["osascript", "-e", applescript])
         
     else:
@@ -848,6 +855,7 @@ def main():
         return
     
     # ── Party sub-menu ──
+    global party_proc
     party_active = False
     party_proc = None
     ipc_server_path = None
@@ -929,7 +937,6 @@ def main():
                     
                     # Auto-copy URL to clipboard based on OS natively
                     try:
-                        import subprocess
                         if os.name == 'nt':
                             subprocess.run(['clip'], input=info['url'].encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                         elif sys.platform == 'darwin':

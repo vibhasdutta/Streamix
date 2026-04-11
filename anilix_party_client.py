@@ -168,8 +168,8 @@ class PartyClient:
                     elif mt == "error":
                         self.chat_history.append(f"[bold red]Error:[/bold red] {data.get('message')}")
                         
-                    if len(self.chat_history) > 20:
-                        self.chat_history = self.chat_history[-20:]
+                    if len(self.chat_history) > 100:
+                        self.chat_history = self.chat_history[-100:]
                         
                 except Exception as e:
                     pass
@@ -242,7 +242,7 @@ class PartyClient:
                 
         elif action == "/users":
             if self.users:
-                user_list = ", ".join([f"{u['name']}({'⭐' if u.get('role')=='host' else '👤'})" for u in self.users])
+                user_list = ", ".join([f"{u['name']}({'👑' if u.get('role')=='host' else '👤'})" for u in self.users])
                 self.chat_history.append(f"[cyan]Online: {user_list}[/cyan]")
             else:
                 self.chat_history.append("[dim]No user list yet.[/dim]")
