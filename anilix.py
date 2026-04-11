@@ -25,12 +25,15 @@ import questionary
 from contextlib import contextmanager
 
 API_BASE = "http://localhost:8000"
-CACHE_FILE = "recent_watch.json"
+JSON_DIR = Path(".json")
+JSON_DIR.mkdir(exist_ok=True)
+CACHE_FILE = str(JSON_DIR / "recent_watch.json")
 VERSION = "1.0.0"
 CACHE_DIR = Path(".cache")
 CACHE_DIR.mkdir(exist_ok=True)
 console = Console()
 backend_process = None
+active_subprocesses = []
 
 def fetch_json(url, params=None, ttl_hours=24):
     """Fetch JSON from API with persistent disk caching."""
@@ -95,6 +98,36 @@ def stop_backend():
                 backend_process.kill()
         finally:
             backend_process = None
+            
+    global active_subprocesses
+    for proc in active_subprocesses:
+        try:
+            proc.terminate()
+            proc.wait(timeout=2)
+        except Exception:
+            try:
+                proc.kill()
+            except:
+                pass
+    active_subprocesses.clear()
+            
+    # Cleanup any zombie ngrok processes or leftover ghost files
+    try:
+        import os
+        if os.name == 'nt':
+            os.system("taskkill /F /IM ngrok.exe /T >nul 2>&1")
+        else:
+            os.system("pkill -9 ngrok >/dev/null 2>&1")
+    except Exception:
+        pass
+    
+    try:
+        import os
+        party_info = os.path.join(os.path.dirname(__file__), ".json", "party_info.json")
+        if os.path.exists(party_info):
+            os.remove(party_info)
+    except Exception:
+        pass
 
 def start_backend():
     global backend_process
@@ -111,8 +144,13 @@ def start_backend():
     server_path = os.path.join(os.path.dirname(__file__), "anilix_server.py")
     
     # Start the server using uvicorn
+    # Ensure .logs directory exists
+    log_dir = os.path.join(os.path.dirname(__file__), ".logs")
+    os.makedirs(log_dir, exist_ok=True)
+    
     # Redirect stderr to a log file for easier debugging
-    log_file = open("anilix_backend.log", "a")
+    log_file_path = os.path.join(log_dir, "anilix_backend.log")
+    log_file = open(log_file_path, "a")
     log_file.write(f"\n--- SESSION START: {time.ctime()} ---\n")
     log_file.flush()
 
@@ -182,7 +220,7 @@ def get_mpv_path():
             return path
     return None
 
-def play_video(url, anime_title, episode_num):
+def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=False, is_live=False, quality=None, ipc_server=None):
     """Platform-aware video playback using mpv exclusively.
     """
     current_os = platform.system()
@@ -190,27 +228,54 @@ def play_video(url, anime_title, episode_num):
 
     # ── Log Playback ──
     try:
-        with open("anilix_backend.log", "a") as f:
-            f.write(f"PLAYBACK: [{time.ctime()}] {anime_title} - Ep {episode_num} | {url}\n")
+        log_dir = os.path.join(os.path.dirname(__file__), ".logs")
+        os.makedirs(log_dir, exist_ok=True)
+        with open(os.path.join(log_dir, "anilix_backend.log"), "a", encoding='utf-8') as f:
+            ep_string = f" - Ep {episode_num}" if episode_num else ""
+            f.write(f"PLAYBACK: [{time.ctime()}] {anime_title}{ep_string} | {url}\n")
     except:
         pass
 
     # ── Try to use mpv ──
     if mpv_path:
-        console.print(f"[bold magenta]▶️ Launching mpv[/bold magenta]")
-        args = [
-            mpv_path,
-            f"--title={anime_title} - Ep {episode_num}",
-            f"--referrer=https://kwik.cx/",
-            f"--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            url
-        ]
+        console.print(f"[bold magenta]▶️ Launching mpv[/bold magenta] [dim](Space: Pause/Play, 9/0: Volume, F: Fullscreen, M: Mute)[/dim]")
+        
+        title_arg = f"--title={anime_title}"
+        if episode_num:
+            title_arg += f" - Ep {episode_num}"
+            
+        args = [mpv_path, title_arg]
+        
+        if ipc_server:
+            args.append(f"--input-ipc-server={ipc_server}")
+        
+        if is_live:
+            args.append("--profile=low-latency")
+        
+        if quality and str(quality).isdigit():
+            # Apply quality constraint for yt-dlp
+            q = int(quality)
+            args.append(f"--ytdl-format=bestvideo[height<={q}]+bestaudio/best[height<={q}]")
+        
+        if not is_custom:
+            args.extend([
+                "--referrer=https://kwik.cx/",
+                "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            ])
+            
+        args.append(url)
+        
         try:
             # Use run() to track end of playback
-            subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # We don't suppress stderr anymore to help debugging if it fails
+            result = subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+            if result.returncode != 0:
+                console.print(f"[bold red]❌ mpv exited with error code {result.returncode}[/bold red]")
+                if result.stderr:
+                    console.print(f"[dim]Error: {result.stderr.strip()}[/dim]")
             return True
         except Exception as e:
-            console.print(f"[bold red]❌ mpv failed to play:[/bold red] {e}")
+            console.print(f"[bold red]❌ mpv failed to launch:[/bold red] {e}")
             return False
     else:
         # MPV Missing - MANDATORY REQUIREMENT
@@ -420,14 +485,14 @@ def display_anime_details(selected_anime):
     console.print()
     return t_str, anilist_id
 
-def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None):
+def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None, ipc_server_path=None):
     with status_after(f"[yellow]🔍 Fetching providers for {t_str}[/yellow]"):
         try:
             # Metadata stays for 24h
             providers = fetch_json(f"{API_BASE}/episodes/{anilist_id}", ttl_hours=24)
         except Exception as e:
             console.print(f"[red]❌ Connection Error: {e}[/red]")
-            console.print("[dim]Check 'anilix_backend.log' for details.[/dim]")
+            console.print("[dim]Check '.logs/anilix_backend.log' for details.[/dim]")
             return
 
     providers = providers.get("providers", {})
@@ -441,6 +506,7 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None)
     
     while True:
         auto_label = "[green]ON[/green]" if auto_play else "[red]OFF[/red]"
+        auto_text = "ON" if auto_play else "OFF"
         if not session_provider:
             console.clear()
             console.print(Align.center(Panel.fit(f"[bold magenta]{t_str}[/bold magenta]", border_style="magenta", box=box.ROUNDED)))
@@ -468,7 +534,7 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None)
             console.print(Align.center(Panel.fit(header, border_style="magenta", box=box.ROUNDED)))
             
             categories = list(providers[session_provider].get("episodes", {}).keys())
-            cat_choices = [questionary.Choice(f"🔄 Toggle Auto-Play ({auto_label})", value="toggle_auto")]
+            cat_choices = [questionary.Choice(f"🔄 Toggle Auto-Play ({auto_text})", value="toggle_auto")]
             cat_choices.extend([questionary.Choice(c.upper(), value=c) for c in categories])
             cat_choices.append(questionary.Separator())
             cat_choices.append(questionary.Choice("🔙 Change Provider", value="back"))
@@ -577,7 +643,8 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None)
         while True:
             selected_url = selected_stream.get("url")
             if selected_url:
-                play_video(selected_url, t_str, ep_num)
+                play_video(selected_url, t_str, ep_num, ipc_server=ipc_server_path)
+                
                 save_cache(t_str, anilist_id, session_provider, session_category, ep_num)
             
                 # --- Auto Next Logic ---
@@ -588,16 +655,59 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None)
                     
                     if auto_play:
                         console.print(f"\n[bold green]✅ Episode Finished[/bold green]")
-                        try:
-                            for i in range(3, 0, -1):
-                                console.print(f"[bold yellow]⏭️  Launching Episode {next_num} in {i} (Press Ctrl+C to cancel)[/bold yellow]  ", end="\r")
-                                time.sleep(1)
-                            console.print() # Move to next line
-                            should_play = True
-                        except KeyboardInterrupt:
-                            console.print(f"\n[bold red]🛑 Auto-Play Cancelled[/bold red]")
-                            should_play = False
-                            break # Exit the playback loop to return to episode list
+                        
+                        is_windows = platform.system() == "Windows"
+                        should_play = False
+                        
+                        if is_windows:
+                            import msvcrt
+                            paused = False
+                            time_left = 3.0
+                            start_time = time.time()
+                            
+                            while time_left > 0:
+                                display = int(time_left) + 1
+                                if paused:
+                                    console.print(f"[bold yellow]⏭️  Auto-Play PAUSED[/bold yellow] ([cyan]'p' to Resume[/cyan] | [red]'c' to Cancel[/red] | [green]Enter to Play[/green])        ", end="\r")
+                                else:
+                                    console.print(f"[bold yellow]⏭️  Launching Episode {next_num} in {display}s[/bold yellow] ([cyan]'p' to Pause[/cyan] | [red]'c' to Cancel[/red] | [green]Enter to Play[/green])        ", end="\r")
+                                
+                                if msvcrt.kbhit():
+                                    char = msvcrt.getch().decode("utf-8", "ignore").lower()
+                                    if char == 'c':
+                                        should_play = False
+                                        break
+                                    elif char == 'p':
+                                        paused = not paused
+                                        if not paused:
+                                            start_time = time.time() - (3.0 - time_left)
+                                    elif char in ['\r', '\n', ' ']:
+                                        should_play = True
+                                        break
+                                
+                                time.sleep(0.05)
+                                if not paused:
+                                    time_left = 3.0 - (time.time() - start_time)
+                            
+                            if time_left <= 0:
+                                should_play = True
+                                
+                            console.print()
+                            
+                            if not should_play:
+                                console.print(f"[bold red]🛑 Auto-Play Cancelled[/bold red]")
+                                break
+                        else:
+                            try:
+                                for i in range(3, 0, -1):
+                                    console.print(f"[bold yellow]⏭️  Launching Episode {next_num} in {i} (Press Ctrl+C to cancel)[/bold yellow]  ", end="\r")
+                                    time.sleep(1)
+                                console.print() # Move to next line
+                                should_play = True
+                            except KeyboardInterrupt:
+                                console.print(f"\n[bold red]🛑 Auto-Play Cancelled[/bold red]")
+                                should_play = False
+                                break # Exit the playback loop to return to episode list
                     else:
                         console.print(f"\n[bold green]✅ Episode Finished![/bold green]")
                         should_play = questionary.confirm(f"Play Episode {next_num} next?", default=True).ask()
@@ -631,20 +741,160 @@ def main():
     start_backend()
     search_history = []
     
+    # ── Mode Selection ──
+    console.clear()
+    console.print(Align.center(Panel.fit(f"[bold cyan]✨ ANILIX v{VERSION} | TERMINAL ANIME INTERFACE ✨[/bold cyan]", border_style="cyan", box=box.ROUNDED)))
+    
+    mode = questionary.select(
+        "How do you want to watch?",
+        choices=[
+            questionary.Choice("🎬 Solo (Watch Alone)", value="solo"),
+            questionary.Choice("🎉 Party (Watch Together)", value="party"),
+        ],
+        instruction="(Select with arrows)"
+    ).ask()
+    
+    if mode is None:
+        console.print(Align.center("[bold magenta]Goodbye! 🎉[/bold magenta]"))
+        return
+    
+    # ── Party sub-menu ──
+    party_active = False
+    party_proc = None
+    ipc_server_path = None
+    
+    if mode == "party":
+        console.clear()
+        console.print(Align.center(Panel.fit("[bold cyan]🎉 WATCH PARTY MODE[/bold cyan]", border_style="cyan", box=box.ROUNDED)))
+        
+        party_choice = questionary.select(
+            "What would you like to do?",
+            choices=[
+                questionary.Choice("📡 Host a Party", value="host"),
+                questionary.Choice("🔗 Join a Party", value="join"),
+                questionary.Choice("🔙 Back", value="back"),
+            ]
+        ).ask()
+        
+        if party_choice is None or party_choice == "back":
+            return main()  # Restart
+        
+        if party_choice == "join":
+            console.clear()
+            console.print(Align.center(Panel.fit("[bold cyan]🔗 JOIN WATCH PARTY[/bold cyan]", border_style="cyan", box=box.ROUNDED)))
+            party_url = questionary.text("Enter Party Link (ws://...):").ask()
+            if not party_url:
+                return
+            username = questionary.text("Enter Your Name:").ask()
+            if not username:
+                username = f"Guest_{int(time.time())%1000}"
+            
+            console.print("[yellow]Connecting... a new window will open for chat.[/yellow]")
+            if os.name == 'nt':
+                py = sys.executable
+                script = os.path.abspath("anilix_party_client.py")
+                chat_proc = subprocess.Popen(
+                    f'start "Anilix Client" cmd /k "\"{py}\" \"{script}\" \"{party_url}\" \"{username}\""',
+                    shell=True
+                )
+            elif sys.platform == "darwin":
+                script_cmd = f'"{sys.executable}" "{os.path.abspath("anilix_party_client.py")}" "{party_url}" "{username}"'
+                escaped_script = script_cmd.replace('"', '\\"')
+                chat_proc = subprocess.Popen(["osascript", "-e", f'tell application "Terminal" to do script "{escaped_script}"'])
+            else:
+                import shutil
+                term = shutil.which("x-terminal-emulator") or shutil.which("gnome-terminal") or shutil.which("konsole") or shutil.which("alacritty") or shutil.which("xterm")
+                if term:
+                    chat_proc = subprocess.Popen([term, "-e", sys.executable, "anilix_party_client.py", party_url, username])
+                else:
+                    console.print("[red]Could not find a suitable terminal emulator![/red]")
+            active_subprocesses.append(chat_proc)
+            console.print("[bold green]✅ Client window launched![/bold green]")
+            input("Press Enter to return to menu...")
+            return main()
+        
+        if party_choice == "host":
+            import uuid
+            uid = str(uuid.uuid4())[:8]
+            ipc_server_path = fr"\\.\pipe\anilix_host_{uid}" if os.name == 'nt' else f"/tmp/anilix_host_{uid}.sock"
+            
+            room_name = questionary.text("Room Name:", default=f"{os.getlogin()}'s Party").ask()
+            host_name = questionary.text("Your Host Name:", default="Host").ask()
+            
+            if not room_name or not host_name:
+                return
+            
+            console.print("[yellow]Starting party server and ngrok tunnel...[/yellow]")
+            party_log_file = open(os.path.join(os.path.dirname(__file__), ".logs", "anilix_backend.log"), "a")
+            party_log_file.write(f"\n--- WATCH PARTY SERVER START: {time.ctime()} ---\n")
+            party_log_file.flush()
+            party_proc = subprocess.Popen(
+                [sys.executable, "anilix_party.py", room_name, host_name],
+                stdout=party_log_file,
+                stderr=party_log_file
+            )
+            active_subprocesses.append(party_proc)
+            
+            party_info_path = os.path.join(os.path.dirname(__file__), ".json", "party_info.json")
+            for _ in range(20):
+                if os.path.exists(party_info_path):
+                    break
+                time.sleep(0.5)
+                
+            if os.path.exists(party_info_path):
+                with open(party_info_path, "r") as f:
+                    info = json.load(f)
+                    console.print(f"\n[bold green]✅ Party ready! Share this link with friends:[/bold green]")
+                    console.print(Align.center(Panel.fit(f"[bold yellow]{info['url']}[/bold yellow]", border_style="green", box=box.ROUNDED)))
+                
+                if os.name == 'nt':
+                    py = sys.executable
+                    script = os.path.abspath("anilix_party_admin.py")
+                    admin_proc = subprocess.Popen(
+                        f'start "Anilix Admin" cmd /k "\"{py}\" \"{script}\" \"{host_name}\" \"{ipc_server_path or ""}\""',
+                        shell=True
+                    )
+                elif sys.platform == "darwin":
+                    script_cmd = f'"{sys.executable}" "{os.path.abspath("anilix_party_admin.py")}" "{host_name}" "{ipc_server_path or ""}"'
+                    admin_proc = subprocess.Popen(["osascript", "-e", f'tell application "Terminal" to do script "{script_cmd}"'])
+                else:
+                    import shutil
+                    term = shutil.which("x-terminal-emulator") or shutil.which("gnome-terminal") or shutil.which("konsole") or shutil.which("alacritty") or shutil.which("xterm")
+                    if term:
+                        admin_proc = subprocess.Popen([term, "-e", sys.executable, "anilix_party_admin.py", host_name, ipc_server_path or ""])
+                    else:
+                        console.print("[red]Could not find a suitable terminal emulator![/red]")
+                active_subprocesses.append(admin_proc)
+                
+                console.print("[dim]Admin console opened in a new window.[/dim]")
+                party_active = True
+            else:
+                console.print("[red]❌ Failed to start party server. Continuing in solo mode.[/red]")
+                if party_proc:
+                    party_proc.terminate()
+                    party_proc = None
+            
+            console.print("\n[bold cyan]Now pick what to watch! 🍿[/bold cyan]")
+            time.sleep(1.5)
+    
+    # ── Main Loop (shared by Solo and Party Host) ──
     while True:
         console.print()
         console.clear()
-        console.print(Align.center(Panel.fit(f"[bold cyan]✨ ANILIX v{VERSION} | TERMINAL ANIME INTERFACE ✨[/bold cyan]", border_style="cyan", box=box.ROUNDED)))
+        
+        mode_label = "[bold green]PARTY HOST[/bold green] 🎉" if party_active else "[bold blue]SOLO[/bold blue] 🎬"
+        console.print(Align.center(Panel.fit(f"[bold cyan]✨ ANILIX v{VERSION}[/bold cyan] | {mode_label}", border_style="cyan", box=box.ROUNDED)))
         
         cache = load_cache()
         
-        # Interactive Main Menu
         menu_choices = [
             questionary.Choice("🔍 Search Anime", value="search"),
             questionary.Choice("🔥 Discover Trending", value="trending")
         ]
         if cache:
             menu_choices.append(questionary.Choice("📚 View Watch History", value="history"))
+            
+        menu_choices.append(questionary.Choice("▶️ Play Custom Video (Local/URL)", value="custom_play"))
         
         menu_choices.append(questionary.Separator())
         menu_choices.append(questionary.Choice("🚪 Exit", value="exit"))
@@ -657,7 +907,81 @@ def main():
         
         if choice is None or choice == "exit":
             console.print(Align.center("[bold magenta]Goodbye! 🎉[/bold magenta]"))
+            if party_proc:
+                party_proc.terminate()
             break
+            
+        elif choice == 'custom_play':
+            console.clear()
+            console.print(Align.center(Panel.fit("[bold cyan]▶️ CUSTOM VIDEO PLAYBACK[/bold cyan]", border_style="cyan", box=box.ROUNDED)))
+            console.print("[dim]Supported: Local files, HTTP Links, YouTube URLs (yt-dlp is installed for mpv)[/dim]\n")
+            
+            sub_choice = questionary.select(
+                "Choose playback source:",
+                choices=[
+                    questionary.Choice("📁 Select Local File", value="local"),
+                    questionary.Choice("🔗 Paste Link", value="link"),
+                    questionary.Choice("📡 Live Stream Link (Low Latency)", value="live"),
+                    questionary.Choice("🔙 Back", value="back")
+                ]
+            ).ask()
+            
+            if not sub_choice or sub_choice == "back":
+                continue
+                
+            is_live_stream = (sub_choice == "live")
+                
+            if sub_choice == "local":
+                import tkinter as tk
+                from tkinter import filedialog
+                
+                # Hide the main tkinter window
+                root = tk.Tk()
+                root.attributes("-topmost", True)
+                root.withdraw()
+                
+                custom_path = filedialog.askopenfilename(
+                    title="Select Video File",
+                    filetypes=[("Video Files", "*.mp4 *.mkv *.avi *.webm *.mov"), ("All Files", "*.*")]
+                )
+                
+                root.destroy()
+                
+                if not custom_path:
+                    continue
+            else:
+                prompt_text = "Enter live stream URL:" if is_live_stream else "Enter video URL:"
+                custom_path = questionary.text(prompt_text).ask()
+                if not custom_path:
+                    continue
+                
+            clean_path = custom_path.strip("\"'")
+            is_url = clean_path.startswith("http://") or clean_path.startswith("https://")
+            
+            if not is_url and not os.path.exists(clean_path):
+                console.print(f"[red]❌ File not found and does not look like a valid URL:[/red] {clean_path}")
+                time.sleep(2)
+                continue
+
+            selected_quality = None
+            if is_url:
+                selected_quality = questionary.select(
+                    "Select Max Quality:",
+                    choices=[
+                        questionary.Choice("🚀 Best Available", value="best"),
+                        questionary.Choice("💎 1080p", value="1080"),
+                        questionary.Choice("🎬 720p", value="720"),
+                        questionary.Choice("📺 480p", value="480"),
+                        questionary.Choice("📟 360p", value="360"),
+                    ]
+                ).ask()
+                if selected_quality == "best":
+                    selected_quality = None
+
+            with status_after("[yellow]▶️ Preparing playback...[/yellow]", center=True):
+                time.sleep(0.5)
+            
+            play_video(clean_path, anime_title="Custom Playback", episode_num="", is_custom=True, is_live=is_live_stream, quality=selected_quality)
             
         elif choice == 'search':
             # Search with History helper
@@ -688,7 +1012,7 @@ def main():
                     results = data.get("results", [])
                 except Exception as e:
                     console.print(f"[red]❌ Connection Error: {e}[/red]")
-                    console.print("[dim]Check 'anilix_backend.log' for details.[/dim]")
+                    console.print("[dim]Check '.logs/anilix_backend.log' for details.[/dim]")
                     continue
             
             if not results:
@@ -699,7 +1023,7 @@ def main():
             selected_anime = show_anime_grid(results)
             if selected_anime:
                 t_str, anilist_id = display_anime_details(selected_anime)
-                handle_episode_flow(anilist_id, t_str)
+                handle_episode_flow(anilist_id, t_str, ipc_server_path=ipc_server_path)
                 
         elif choice == 'trending':
             with status_after(f"[yellow]🔥 Fetching Trending Anime[/yellow]", center=True):
@@ -709,7 +1033,7 @@ def main():
                     results = data.get("results", [])
                 except Exception as e:
                     console.print(f"[red]❌ Connection Error: {e}[/red]")
-                    console.print("[dim]Check 'anilix_backend.log' for details.[/dim]")
+                    console.print("[dim]Check '.logs/anilix_backend.log' for details.[/dim]")
                     continue
             
             if not results:
@@ -720,7 +1044,7 @@ def main():
             selected_anime = show_anime_grid(results)
             if selected_anime:
                 t_str, anilist_id = display_anime_details(selected_anime)
-                handle_episode_flow(anilist_id, t_str)
+                handle_episode_flow(anilist_id, t_str, ipc_server_path=ipc_server_path)
                 
         elif choice == 'history' and cache:
             console.clear()
@@ -752,8 +1076,9 @@ def main():
             handle_episode_flow(
                 anilist_id, 
                 t_str, 
-                selected_item["provider"], 
-                selected_item["category"]
+                pre_provider=selected_item.get("provider"),
+                pre_category=selected_item.get("category"),
+                ipc_server_path=ipc_server_path
             )
         else:
             console.print("[red]❌ Invalid option![/red]")

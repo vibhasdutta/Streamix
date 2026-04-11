@@ -14,4 +14,4 @@ wheels/
 recent_watch.json
 .cache/
 uv.lock
-anilix_backend.log
+.logs/
