@@ -86,6 +86,7 @@ def status_after(text, center=False):
         yield
 
 def stop_backend():
+    """Full cleanup of ALL Anilix processes: backend, party server, ngrok, Terminal windows, IPC sockets."""
     global backend_process
     if backend_process:
         try:
@@ -95,15 +96,17 @@ def stop_backend():
                 backend_process.wait(timeout=3)
         except:
             if backend_process:
-                backend_process.kill()
+                try: backend_process.kill()
+                except: pass
         finally:
             backend_process = None
             
     global active_subprocesses
     for proc in active_subprocesses:
         try:
-            proc.terminate()
-            proc.wait(timeout=2)
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=2)
         except Exception:
             try:
                 proc.kill()
@@ -111,9 +114,8 @@ def stop_backend():
                 pass
     active_subprocesses.clear()
             
-    # Cleanup any zombie ngrok processes or leftover ghost files
+    # Kill any zombie ngrok processes
     try:
-        import os
         if os.name == 'nt':
             os.system("taskkill /F /IM ngrok.exe /T >nul 2>&1")
         else:
@@ -121,13 +123,49 @@ def stop_backend():
     except Exception:
         pass
     
+    # Close any Terminal windows spawned by Anilix on macOS
+    if sys.platform == "darwin":
+        try:
+            # Close Terminal tabs/windows running anilix_party scripts
+            applescript = '''
+            tell application "Terminal"
+                set windowList to every window
+                repeat with w in windowList
+                    set tabList to every tab of w
+                    repeat with t in tabList
+                        set tabProcs to processes of t
+                        repeat with p in tabProcs
+                            if p contains "anilix_party" then
+                                close w
+                                exit repeat
+                            end if
+                        end repeat
+                    end repeat
+                end repeat
+            end tell
+            '''
+            subprocess.run(["osascript", "-e", applescript],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+        except Exception:
+            pass
+    
+    # Cleanup party info file
     try:
-        import os
         party_info = os.path.join(os.path.dirname(__file__), ".json", "party_info.json")
         if os.path.exists(party_info):
             os.remove(party_info)
     except Exception:
         pass
+    
+    # Cleanup any leftover IPC socket files (Unix only)
+    if os.name != 'nt':
+        try:
+            import glob
+            for sock in glob.glob("/tmp/anilix_*.sock"):
+                try: os.remove(sock)
+                except: pass
+        except Exception:
+            pass
 
 def start_backend():
     global backend_process
@@ -865,7 +903,8 @@ def main():
                     )
                 elif sys.platform == "darwin":
                     script_cmd = f'"{sys.executable}" "{os.path.abspath("anilix_party_admin.py")}" "{host_name}" "{ipc_server_path or ""}"'
-                    admin_proc = subprocess.Popen(["osascript", "-e", f'tell application "Terminal" to do script "{script_cmd}"'])
+                    escaped_script = script_cmd.replace('"', '\\"')
+                    admin_proc = subprocess.Popen(["osascript", "-e", f'tell application "Terminal" to do script "{escaped_script}"'])
                 else:
                     import shutil
                     term = shutil.which("x-terminal-emulator") or shutil.which("gnome-terminal") or shutil.which("konsole") or shutil.which("alacritty") or shutil.which("xterm")
@@ -916,8 +955,6 @@ def main():
         
         if choice is None or choice == "exit":
             console.print(Align.center("[bold magenta]Goodbye! 🎉[/bold magenta]"))
-            if party_proc:
-                party_proc.terminate()
             break
             
         elif choice == 'custom_play':
@@ -1093,6 +1130,17 @@ def main():
             console.print("[red]❌ Invalid option![/red]")
 
 if __name__ == "__main__":
+    import signal
+    
+    def _signal_cleanup(signum, frame):
+        """Handle SIGTERM/SIGINT for clean shutdown."""
+        console.print("\n[dim]Received shutdown signal, cleaning up...[/dim]")
+        stop_backend()
+        sys.exit(0)
+    
+    signal.signal(signal.SIGTERM, _signal_cleanup)
+    signal.signal(signal.SIGINT, _signal_cleanup)
+    
     try:
         main()
     except KeyboardInterrupt:
