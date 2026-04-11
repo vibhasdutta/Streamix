@@ -416,6 +416,15 @@ def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=Fal
                 "--referrer=https://kwik.cx/",
                 "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
             ])
+        else:
+            # Custom URLs (HLS/m3u8/DASH) still need a user-agent or many servers reject the request
+            args.append("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            # Better buffering for multi-stream HLS/DASH
+            args.extend([
+                "--demuxer-max-bytes=150MiB",
+                "--demuxer-max-back-bytes=75MiB",
+                "--cache=yes",
+            ])
             
         args.append(url)
         
@@ -858,16 +867,49 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None,
                                 console.print(f"[bold red]🛑 Auto-Play Cancelled[/bold red]")
                                 break
                         else:
+                            import select, tty, termios
+                            fd = sys.stdin.fileno()
+                            old_settings = termios.tcgetattr(fd)
                             try:
-                                for i in range(3, 0, -1):
-                                    console.print(f"[bold yellow]⏭️  Launching Episode {next_num} in {i} (Press Ctrl+C to cancel)[/bold yellow]  ", end="\r")
-                                    time.sleep(1)
-                                console.print() # Move to next line
-                                should_play = True
-                            except KeyboardInterrupt:
-                                console.print(f"\n[bold red]🛑 Auto-Play Cancelled[/bold red]")
-                                should_play = False
-                                break # Exit the playback loop to return to episode list
+                                tty.setcbreak(fd)
+                                paused = False
+                                time_left = 3.0
+                                start_time = time.time()
+                                
+                                while time_left > 0:
+                                    display = int(time_left) + 1
+                                    if paused:
+                                        console.print(f"[bold yellow]⏭️  Auto-Play PAUSED[/bold yellow] ([cyan]'p' to Resume[/cyan] | [red]'c' to Cancel[/red] | [green]Enter to Play[/green])        ", end="\r")
+                                    else:
+                                        console.print(f"[bold yellow]⏭️  Launching Episode {next_num} in {display}s[/bold yellow] ([cyan]'p' to Pause[/cyan] | [red]'c' to Cancel[/red] | [green]Enter to Play[/green])        ", end="\r")
+                                    
+                                    dr, _, _ = select.select([sys.stdin], [], [], 0.05)
+                                    if dr:
+                                        char = sys.stdin.read(1).lower()
+                                        if char == 'c':
+                                            should_play = False
+                                            break
+                                        elif char == 'p':
+                                            paused = not paused
+                                            if not paused:
+                                                start_time = time.time() - (3.0 - time_left)
+                                        elif char in ['\r', '\n', ' ']:
+                                            should_play = True
+                                            break
+                                    
+                                    if not paused:
+                                        time_left = 3.0 - (time.time() - start_time)
+                                
+                                if time_left <= 0:
+                                    should_play = True
+                                
+                                console.print()
+                                
+                                if not should_play:
+                                    console.print(f"[bold red]🛑 Auto-Play Cancelled[/bold red]")
+                                    break
+                            finally:
+                                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
                     else:
                         console.print(f"\n[bold green]✅ Episode Finished![/bold green]")
                         should_play = questionary.confirm(f"Play Episode {next_num} next?", default=True).ask()

@@ -358,11 +358,12 @@ class PartyAdminTUI:
                 time_pos = 0.0
                 current_url = None
                 current_title = None
+                mpv_alive = False
                 
                 # IPC get property is synchronous for simplicity here
                 def query_mpv():
                     import json
-                    nonlocal pause_state, time_pos, current_url, current_title
+                    nonlocal pause_state, time_pos, current_url, current_title, mpv_alive
                     try:
                         if IS_WINDOWS:
                             # Read win32 pipe
@@ -406,22 +407,32 @@ class PartyAdminTUI:
                             res = json.loads(s.recv(1024).decode().split('\n')[0])
                             current_title = res.get("data")
                             s.close()
+                        mpv_alive = True
                     except Exception:
-                        pass
+                        mpv_alive = False
                 
                 # Run query in thread to not block async loops
                 await asyncio.to_thread(query_mpv)
                 
-                # Send sync to server
+                # Only send sync when MPV is actually running
+                # When MPV is closed (host picking new episode), send paused state to freeze clients
                 if self.ws:
-                    payload = {
-                        "type": "sync",
-                        "state": "paused" if pause_state else "playing",
-                        "timestamp": time_pos
-                    }
-                    if current_url: payload["url"] = current_url
-                    if current_title: payload["anime_title"] = current_title
-                    await self.ws.send(json.dumps(payload, ensure_ascii=False))
+                    if mpv_alive and current_url:
+                        payload = {
+                            "type": "sync",
+                            "state": "paused" if pause_state else "playing",
+                            "timestamp": time_pos
+                        }
+                        if current_url: payload["url"] = current_url
+                        if current_title: payload["anime_title"] = current_title
+                        await self.ws.send(json.dumps(payload, ensure_ascii=False))
+                    elif not mpv_alive:
+                        # MPV is closed — tell clients to pause so they don't loop
+                        await self.ws.send(json.dumps({
+                            "type": "sync",
+                            "state": "paused",
+                            "timestamp": 0
+                        }))
                     
             except Exception:
                 pass
