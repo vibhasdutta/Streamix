@@ -70,7 +70,25 @@ class PartyClient:
 
     async def connect_and_listen(self):
         try:
-            self.ws = await websockets.connect(self.ws_url)
+            # Build connection kwargs for ngrok compatibility
+            connect_kwargs = {
+                "ping_interval": 20,
+                "ping_timeout": 20,
+                "close_timeout": 10,
+                "additional_headers": {
+                    "User-Agent": "Anilix-Party-Client/1.0",
+                },
+            }
+            
+            # Handle wss:// (ngrok HTTPS tunnels) — need SSL context
+            if self.ws_url.startswith("wss://"):
+                import ssl
+                ssl_ctx = ssl.create_default_context()
+                ssl_ctx.check_hostname = False
+                ssl_ctx.verify_mode = ssl.CERT_NONE
+                connect_kwargs["ssl"] = ssl_ctx
+            
+            self.ws = await websockets.connect(self.ws_url, **connect_kwargs)
             
             # Join as member
             await self.ws.send(json.dumps({"type": "join", "name": self.username, "role": "member"}))
@@ -156,11 +174,17 @@ class PartyClient:
                 except Exception as e:
                     pass
                     
-        except websockets.exceptions.ConnectionClosed:
-            self.chat_history.append("[bold red]Connection lost.[/bold red]")
+        except websockets.exceptions.ConnectionClosed as e:
+            self.chat_history.append(f"[bold red]Connection lost: {e.reason if e.reason else 'Server closed connection'}[/bold red]")
+            self.running = False
+        except websockets.exceptions.InvalidStatusCode as e:
+            self.chat_history.append(f"[bold red]Connection rejected (HTTP {e.status_code}). Is the party still active?[/bold red]")
+            self.running = False
+        except ConnectionRefusedError:
+            self.chat_history.append("[bold red]Connection refused. The party server may not be running.[/bold red]")
             self.running = False
         except Exception as e:
-            self.chat_history.append(f"[bold red]Failed to connect: {e}[/bold red]")
+            self.chat_history.append(f"[bold red]Failed to connect: {type(e).__name__}: {e}[/bold red]")
             self.running = False
 
     def _launch_mpv(self, url, title, timestamp):

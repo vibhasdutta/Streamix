@@ -253,7 +253,16 @@ logging.getLogger("websockets").setLevel(logging.CRITICAL)
 
 async def serve(room_name, host_name, max_users, port=9000):
     server_logic = WatchPartyServer(room_name, host_name, max_users)
-    server = await websockets.serve(server_logic.handler, "0.0.0.0", port)
+    server = await websockets.serve(
+        server_logic.handler,
+        "0.0.0.0",
+        port,
+        ping_interval=20,
+        ping_timeout=20,
+        close_timeout=10,
+        max_size=2**20,  # 1MB max message
+        origins=[None],  # Accept connections without Origin header (Python clients via ngrok)
+    )
     return server
 
 def start_server_and_tunnel(room_name, host_name, max_users=10, port=9000):

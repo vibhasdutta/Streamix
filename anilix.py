@@ -782,9 +782,18 @@ def main():
         if party_choice == "join":
             console.clear()
             console.print(Align.center(Panel.fit("[bold cyan]🔗 JOIN WATCH PARTY[/bold cyan]", border_style="cyan", box=box.ROUNDED)))
-            party_url = questionary.text("Enter Party Link (ws://...):").ask()
+            party_url = questionary.text("Enter Party Link (wss://... or ws://...):").ask()
             if not party_url:
                 return
+            # Normalize URL: accept any format the user pastes
+            party_url = party_url.strip()
+            if party_url.startswith("https://"):
+                party_url = party_url.replace("https://", "wss://", 1)
+            elif party_url.startswith("http://"):
+                party_url = party_url.replace("http://", "ws://", 1)
+            elif not party_url.startswith("ws://") and not party_url.startswith("wss://"):
+                party_url = "wss://" + party_url
+            
             username = questionary.text("Enter Your Name:").ask()
             if not username:
                 username = f"Guest_{int(time.time())%1000}"
