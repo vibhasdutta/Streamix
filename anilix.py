@@ -6,6 +6,7 @@ import sys
 import subprocess
 import atexit
 import shutil
+import platform
 import hashlib
 from pathlib import Path
 from rich.console import Console
@@ -181,6 +182,65 @@ def stop_backend():
                 except: pass
         except Exception:
             pass
+
+def _cleanup_party():
+    """Kill all party-related processes (server, ngrok, admin/client terminals) without touching the backend."""
+    # Kill party scripts
+    try:
+        if IS_WINDOWS:
+            os.system("taskkill /F /IM ngrok.exe /T >nul 2>&1")
+        else:
+            os.system("pkill -f anilix_party_admin.py >/dev/null 2>&1")
+            os.system("pkill -f anilix_party_client.py >/dev/null 2>&1")
+            os.system("pkill -f anilix_party.py >/dev/null 2>&1")
+            os.system("pkill -9 ngrok >/dev/null 2>&1")
+    except Exception:
+        pass
+    
+    # Close leftover Terminal windows on macOS
+    if IS_MACOS:
+        try:
+            time.sleep(0.3)
+            applescript = '''
+            tell application "Terminal"
+                repeat with w in windows
+                    try
+                        repeat with t in tabs of w
+                            if busy of t is false then
+                                close w saving no
+                                exit repeat
+                            end if
+                        end repeat
+                    end try
+                end repeat
+            end tell
+            '''
+            subprocess.run(["osascript", "-e", applescript],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+        except Exception:
+            pass
+    
+    # Remove party_info.json so the next host doesn't read stale data
+    try:
+        party_info = os.path.join(os.path.dirname(__file__), ".json", "party_info.json")
+        if os.path.exists(party_info):
+            os.remove(party_info)
+    except Exception:
+        pass
+    
+    # Cleanup IPC sockets
+    if not IS_WINDOWS:
+        try:
+            import glob
+            for sock in glob.glob("/tmp/anilix_*.sock"):
+                try: os.remove(sock)
+                except: pass
+        except Exception:
+            pass
+    
+    # Remove dead party procs from active_subprocesses
+    global active_subprocesses
+    active_subprocesses = [p for p in active_subprocesses if p.poll() is None]
 
 def _open_in_new_terminal(script_name, args, title="Anilix"):
     """Open a Python script in a new terminal window. Works on macOS, Windows, and Linux."""
@@ -922,6 +982,10 @@ def main():
                 return
             
             console.print("[yellow]Starting party server and ngrok tunnel...[/yellow]")
+            
+            # Clean up any leftover party processes from a previous session
+            _cleanup_party()
+            time.sleep(0.5)  # Give port 9000 time to be released
             party_log_file = open(os.path.join(os.path.dirname(__file__), ".logs", "anilix_backend.log"), "a")
             party_log_file.write(f"\n--- WATCH PARTY SERVER START: {time.ctime()} ---\n")
             party_log_file.flush()
@@ -998,6 +1062,7 @@ def main():
         menu_choices.append(questionary.Choice("▶️ Play Custom Video (Local/URL)", value="custom_play"))
         
         menu_choices.append(questionary.Separator())
+        menu_choices.append(questionary.Choice("🔙 Back", value="back"))
         menu_choices.append(questionary.Choice("🚪 Exit", value="exit"))
         
         choice = questionary.select(
@@ -1009,6 +1074,10 @@ def main():
         if choice is None or choice == "exit":
             console.print(Align.center("[bold magenta]Goodbye! 🎉[/bold magenta]"))
             break
+        
+        if choice == "back":
+            _cleanup_party()
+            return main()
             
         elif choice == 'custom_play':
             console.clear()

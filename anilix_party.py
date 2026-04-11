@@ -248,8 +248,13 @@ class WatchPartyServer:
                 del self.clients[websocket]
             if client_name and client_name in self.users:
                 role = self.users[client_name].get('role')
-                self.users[client_name]['online'] = False
-                self.users[client_name]['ws'] = None
+                if role == 'host':
+                    # Keep host in list but mark offline
+                    self.users[client_name]['online'] = False
+                    self.users[client_name]['ws'] = None
+                else:
+                    # Remove non-host users entirely so they don't appear as ghosts
+                    del self.users[client_name]
                 self._broadcast({"type": "system", "message": f"{client_name} left the room."})
                 self._broadcast_user_list()
                 

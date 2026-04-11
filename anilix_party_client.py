@@ -275,10 +275,9 @@ class PartyClient:
             self.chat_history.append("[cyan]/deafen <user>[/cyan] — Toggle hide their chat & activity (local only)")
             self.chat_history.append("[cyan]/vol <0-150>[/cyan] — Set your video volume")
             self.chat_history.append("[cyan]/users[/cyan] — List online users")
-            self.chat_history.append("[cyan]/back[/cyan] — Close client panel")
-            self.chat_history.append("[cyan]/exit[/cyan] — Exit client panel")
+            self.chat_history.append("[cyan]/close[/cyan] — Close this window")
             self.chat_history.append("[cyan]/help[/cyan] — Show this help")
-        elif action in ["/back", "/exit", "/close"]:
+        elif action in ["/exit", "/close"]:
             self.running = False
         else:
             self.chat_history.append(f"[red]Unknown command: {action}. Type /help[/red]")
@@ -295,13 +294,8 @@ class PartyClient:
 
                 sender = payload.get("sender", "Unknown")
                 message = payload.get("message", "")
-                bubble = Panel(
-                    Text(escape(message)),
-                    title=f"{sender}",
-                    border_style="magenta" if sender == self.username else "cyan",
-                    expand=False,
-                )
-                chat_rows.append(Align.right(bubble) if sender == self.username else Align.left(bubble))
+                color = "magenta" if sender == self.username else "cyan"
+                chat_rows.append(Text.from_markup(f"[bold {color}]{escape(sender)}[/bold {color}] :: {escape(message)}"))
             else:
                 chat_rows.append(Text.from_markup(entry))
         return Group(*chat_rows) if chat_rows else Text("")
@@ -337,16 +331,16 @@ class PartyClient:
             user_table.add_row(icon, name_display)
         layout["users"].update(Panel(user_table, title="Users", border_style="cyan"))
         
-        # Chat panel
+        # Chat panel — align to bottom so new messages appear at bottom
         import shutil
-        max_lines = max(5, shutil.get_terminal_size().lines - 15)
+        max_lines = max(5, shutil.get_terminal_size().lines - 10)
         chat_content = self._render_chat_feed(max_lines)
-        layout["chat"].update(Panel(chat_content, title="Chat", border_style="blue"))
+        layout["chat"].update(Panel(Align(chat_content, vertical="bottom"), title="Chat", border_style="blue"))
         
         input_panel = Panel(
             f"> {self.input_text}█",
             border_style="green",
-            title="Message (/help, /back, /exit | Esc to close)",
+            title="Message (/help for commands)",
         )
         layout["input"].update(input_panel)
         
