@@ -349,19 +349,35 @@ class PartyClient:
                         self.running = False
         finally:
             input_handler.cleanup()
+            # Kill mpv if still running (no point playing without sync)
             if getattr(self, 'mpv_process', None):
                 try: self.mpv_process.terminate()
                 except: pass
+            # Close WebSocket gracefully
+            if self.ws:
+                try: await self.ws.close()
+                except: pass
+            # Show shutdown message briefly so user can read disconnect reason
+            if not self.running:
+                console.print("\n[bold yellow]Closing in 3 seconds...[/bold yellow]")
+                await asyncio.sleep(3)
 
 if __name__ == "__main__":
     import sys
+    import signal
+    
+    # Handle SIGTERM from pkill so script exits cleanly
+    def _handle_term(signum, frame):
+        raise SystemExit(0)
+    signal.signal(signal.SIGTERM, _handle_term)
+    
     url = sys.argv[1] if len(sys.argv) > 1 else "ws://localhost:9000"
     username = sys.argv[2] if len(sys.argv) > 2 else f"Guest_{int(time.time())%1000}"
     
     try:
         client = PartyClient(ws_url=url, username=username)
         asyncio.run(client.run())
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
         pass
     except Exception as e:
         print(f"Error: {e}")

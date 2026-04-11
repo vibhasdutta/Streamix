@@ -114,33 +114,35 @@ def stop_backend():
                 pass
     active_subprocesses.clear()
             
-    # Kill any zombie ngrok processes
+    # Kill anilix_party Python processes (the actual scripts running in Terminal windows)
+    # This triggers '; exit' to auto-close the Terminal windows
     try:
         if os.name == 'nt':
             os.system("taskkill /F /IM ngrok.exe /T >nul 2>&1")
         else:
+            os.system("pkill -f anilix_party_admin.py >/dev/null 2>&1")
+            os.system("pkill -f anilix_party_client.py >/dev/null 2>&1")
+            os.system("pkill -f anilix_party.py >/dev/null 2>&1")
             os.system("pkill -9 ngrok >/dev/null 2>&1")
     except Exception:
         pass
     
-    # Close any Terminal windows spawned by Anilix on macOS
+    # Give Terminal windows a moment to close via '; exit', then force-close stragglers
     if sys.platform == "darwin":
         try:
-            # Close Terminal tabs/windows running anilix_party scripts
+            time.sleep(0.5)
+            # Close any Terminal windows where the shell has already exited
             applescript = '''
             tell application "Terminal"
-                set windowList to every window
-                repeat with w in windowList
-                    set tabList to every tab of w
-                    repeat with t in tabList
-                        set tabProcs to processes of t
-                        repeat with p in tabProcs
-                            if p contains "anilix_party" then
-                                close w
+                repeat with w in windows
+                    try
+                        repeat with t in tabs of w
+                            if busy of t is false then
+                                close w saving no
                                 exit repeat
                             end if
                         end repeat
-                    end repeat
+                    end try
                 end repeat
             end tell
             '''
@@ -847,7 +849,7 @@ def main():
                     shell=True
                 )
             elif sys.platform == "darwin":
-                script_cmd = f'"{sys.executable}" "{os.path.abspath("anilix_party_client.py")}" "{party_url}" "{username}"'
+                script_cmd = f'"{sys.executable}" "{os.path.abspath("anilix_party_client.py")}" "{party_url}" "{username}"; exit'
                 escaped_script = script_cmd.replace('"', '\\"')
                 chat_proc = subprocess.Popen(["osascript", "-e", f'tell application "Terminal" to do script "{escaped_script}"'])
             else:
@@ -904,7 +906,7 @@ def main():
                         shell=True
                     )
                 elif sys.platform == "darwin":
-                    script_cmd = f'"{sys.executable}" "{os.path.abspath("anilix_party_admin.py")}" "{host_name}" "{ipc_server_path or ""}"'
+                    script_cmd = f'"{sys.executable}" "{os.path.abspath("anilix_party_admin.py")}" "{host_name}" "{ipc_server_path or ""}"; exit'
                     escaped_script = script_cmd.replace('"', '\\"')
                     admin_proc = subprocess.Popen(["osascript", "-e", f'tell application "Terminal" to do script "{escaped_script}"'])
                 else:

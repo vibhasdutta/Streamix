@@ -124,8 +124,10 @@ class PartyAdminTUI:
                     
         except websockets.exceptions.ConnectionClosed:
             self.chat_history.append("[bold red]Connection to server closed.[/bold red]")
+            self.running = False
         except Exception as e:
             self.chat_history.append(f"[bold red]Failed to connect to local server: {e}[/bold red]")
+            self.running = False
 
     def handle_command(self, cmd):
         if not self.ws:
@@ -413,15 +415,30 @@ class PartyAdminTUI:
                     await asyncio.sleep(0.05)
         finally:
             input_handler.cleanup()
+            # Close WebSocket gracefully
+            if self.ws:
+                try: await self.ws.close()
+                except: pass
+            # Show shutdown message briefly so user can read it
+            if not self.running:
+                console.print("\n[bold yellow]Admin panel closing in 3 seconds...[/bold yellow]")
+                await asyncio.sleep(3)
 
 if __name__ == "__main__":
     import sys
+    import signal
+    
+    # Handle SIGTERM from pkill so script exits cleanly
+    def _handle_term(signum, frame):
+        raise SystemExit(0)
+    signal.signal(signal.SIGTERM, _handle_term)
+    
     host = sys.argv[1] if len(sys.argv) > 1 else "Host"
     ipc_path = sys.argv[2] if len(sys.argv) > 2 else None
     try:
         tui = PartyAdminTUI(username=host, ipc_path=ipc_path)
         asyncio.run(tui.run())
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
         pass
     except Exception as e:
         print(f"Error: {e}")
