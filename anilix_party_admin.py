@@ -406,17 +406,10 @@ class PartyAdminTUI:
             # Start mpv sync poller
             asyncio.create_task(self._mpv_poller())
             
-            import copy
-            last_state = None
-            
-            # Render loop
-            with Live(self.generate_layout(), refresh_per_second=10) as live:
+            # Render loop — always refresh for instant chat updates
+            with Live(self.generate_layout(), refresh_per_second=15) as live:
                 while self.running:
-                    # Naive cheap state hash
-                    current_state = (self.input_text, len(self.chat_history), len(self.users), hash(str(self.users)))
-                    if current_state != last_state:
-                        live.update(self.generate_layout())
-                        last_state = current_state
+                    live.update(self.generate_layout())
                     await asyncio.sleep(0.05)
         finally:
             input_handler.cleanup()

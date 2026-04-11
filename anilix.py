@@ -788,11 +788,13 @@ def main():
         choices=[
             questionary.Choice("🎬 Solo (Watch Alone)", value="solo"),
             questionary.Choice("🎉 Party (Watch Together)", value="party"),
+            questionary.Separator(),
+            questionary.Choice("🚪 Exit", value="exit"),
         ],
         instruction="(Select with arrows)"
     ).ask()
     
-    if mode is None:
+    if mode is None or mode == "exit":
         console.print(Align.center("[bold magenta]Goodbye! 🎉[/bold magenta]"))
         return
     

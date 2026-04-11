@@ -339,14 +339,10 @@ class PartyClient:
             asyncio.create_task(self.connect_and_listen())
             asyncio.create_task(self.input_loop(input_handler))
             
-            last_state = None
-            
-            with Live(self.generate_layout(), refresh_per_second=10) as live:
+            # Render loop — always refresh for instant chat updates
+            with Live(self.generate_layout(), refresh_per_second=15) as live:
                 while self.running:
-                    current_state = (self.input_text, len(self.chat_history), len(self.users), hash(str(self.users)))
-                    if current_state != last_state:
-                        live.update(self.generate_layout())
-                        last_state = current_state
+                    live.update(self.generate_layout())
                     await asyncio.sleep(0.05)
                     if self.mpv_process and self.mpv_process.poll() is not None:
                         # mpv closed manually by user
