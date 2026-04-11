@@ -24,11 +24,16 @@ from rich import box
 import questionary
 from contextlib import contextmanager
 
+USER_HOME = Path.home()
+APP_DATA_DIR = USER_HOME / ".config" / "anilix"
+APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
 API_BASE = "http://localhost:8000"
-CACHE_FILE = "recent_watch.json"
+CACHE_FILE = APP_DATA_DIR / "recent_watch.json"
 VERSION = "1.0.0"
-CACHE_DIR = Path(".cache")
+CACHE_DIR = APP_DATA_DIR / ".cache"
 CACHE_DIR.mkdir(exist_ok=True)
+LOG_FILE = APP_DATA_DIR / "anilix_backend.log"
 console = Console()
 backend_process = None
 
@@ -112,7 +117,7 @@ def start_backend():
     
     # Start the server using uvicorn
     # Redirect stderr to a log file for easier debugging
-    log_file = open("anilix_backend.log", "a")
+    log_file = open(LOG_FILE, "a")
     log_file.write(f"\n--- SESSION START: {time.ctime()} ---\n")
     log_file.flush()
 
@@ -190,7 +195,7 @@ def play_video(url, anime_title, episode_num):
 
     # ── Log Playback ──
     try:
-        with open("anilix_backend.log", "a") as f:
+        with open(LOG_FILE, "a") as f:
             f.write(f"PLAYBACK: [{time.ctime()}] {anime_title} - Ep {episode_num} | {url}\n")
     except:
         pass
