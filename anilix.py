@@ -840,28 +840,13 @@ def main():
             if not username:
                 username = f"Guest_{int(time.time())%1000}"
             
-            console.print("[yellow]Connecting... a new window will open for chat.[/yellow]")
-            if os.name == 'nt':
-                py = sys.executable
-                script = os.path.abspath("anilix_party_client.py")
-                chat_proc = subprocess.Popen(
-                    f'start "Anilix Client" cmd /k "\"{py}\" \"{script}\" \"{party_url}\" \"{username}\""',
-                    shell=True
-                )
-            elif sys.platform == "darwin":
-                script_cmd = f'"{sys.executable}" "{os.path.abspath("anilix_party_client.py")}" "{party_url}" "{username}"; exit'
-                escaped_script = script_cmd.replace('"', '\\"')
-                chat_proc = subprocess.Popen(["osascript", "-e", f'tell application "Terminal" to do script "{escaped_script}"'])
-            else:
-                import shutil
-                term = shutil.which("x-terminal-emulator") or shutil.which("gnome-terminal") or shutil.which("konsole") or shutil.which("alacritty") or shutil.which("xterm")
-                if term:
-                    chat_proc = subprocess.Popen([term, "-e", sys.executable, "anilix_party_client.py", party_url, username])
-                else:
-                    console.print("[red]Could not find a suitable terminal emulator![/red]")
-            active_subprocesses.append(chat_proc)
-            console.print("[bold green]✅ Client window launched![/bold green]")
-            input("Press Enter to return to menu...")
+            console.print("[yellow]Joining Party Room...[/yellow]")
+            try:
+                subprocess.run([sys.executable, "anilix_party_client.py", party_url, username])
+            except KeyboardInterrupt:
+                pass
+            
+            # Automatically returns to main menu when client disconnects or party ends
             return main()
         
         if party_choice == "host":
@@ -902,7 +887,7 @@ def main():
                     py = sys.executable
                     script = os.path.abspath("anilix_party_admin.py")
                     admin_proc = subprocess.Popen(
-                        f'start "Anilix Admin" cmd /k "\"{py}\" \"{script}\" \"{host_name}\" \"{ipc_server_path or ""}\""',
+                        f'start "Anilix Admin" cmd /c "\"{py}\" \"{script}\" \"{host_name}\" \"{ipc_server_path or ""}\""',
                         shell=True
                     )
                 elif sys.platform == "darwin":

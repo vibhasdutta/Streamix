@@ -419,6 +419,22 @@ class PartyAdminTUI:
             if self.ws:
                 try: await self.ws.close()
                 except: pass
+            
+            # Send quit command to Host MPV player
+            if self.ipc_path:
+                try:
+                    import socket, json
+                    if os.name == 'nt':
+                        with open(self.ipc_path, 'r+') as f:
+                            f.write(json.dumps({"command": ["quit"]}) + "\n")
+                            f.flush()
+                    else:
+                        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                        s.connect(self.ipc_path)
+                        s.sendall((json.dumps({"command": ["quit"]}) + "\n").encode())
+                        s.close()
+                except:
+                    pass
             # Show shutdown message briefly so user can read it
             if not self.running:
                 console.print("\n[bold yellow]Admin panel closing in 3 seconds...[/bold yellow]")

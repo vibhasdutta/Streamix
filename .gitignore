@@ -11,7 +11,7 @@ wheels/
 
 
 # misc files
-recent_watch.json
 .cache/
 uv.lock
 .logs/
+.json/
