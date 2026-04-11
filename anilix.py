@@ -420,11 +420,10 @@ def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=Fal
         args.append(url)
         
         try:
-            global party_proc
-            mpv_process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+            mpv_process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             
             while mpv_process.poll() is None:
-                time.sleep(0.5)
+                time.sleep(0.3)
                 # If party server unexpectedly dies (e.g. host clicked X), abort playback immediately
                 if ipc_server and party_proc and party_proc.poll() is not None:
                     mpv_process.terminate()
@@ -432,7 +431,8 @@ def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=Fal
             
             return True
         except KeyboardInterrupt:
-            mpv_process.terminate()
+            try: mpv_process.terminate()
+            except: pass
             return True
         except Exception as e:
             console.print(f"[bold red]❌ mpv failed to launch:[/bold red] {e}")
