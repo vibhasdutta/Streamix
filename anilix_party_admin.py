@@ -12,9 +12,11 @@ from rich.live import Live
 from rich.text import Text
 from rich.align import Align
 from rich.markup import escape
+from rich.console import Group
 from utils.os_detector import IS_WINDOWS
 
 console = Console()
+CHAT_TOKEN = "__CHAT__"
 
 class PartyAdminTUI:
     def __init__(self, username="Host", ipc_path=None):
@@ -49,6 +51,10 @@ class PartyAdminTUI:
                 self.room_name = info.get("room_name", "Party")
         except:
             pass
+
+    def _append_chat(self, sender, message):
+        payload = {"sender": sender, "message": message}
+        self.chat_history.append(f"{CHAT_TOKEN}{json.dumps(payload, ensure_ascii=False)}")
 
     def _play_notification(self):
         if not self.notifications_enabled:
@@ -106,9 +112,7 @@ class PartyAdminTUI:
                         # Local filter: skip if admin locally muted/deafened this user
                         if sender in self.local_muted or sender in self.local_deafened:
                             continue
-                        self.chat_history.append(
-                            f"[bold cyan]{escape(sender)}:[/bold cyan] {escape(msg)}"
-                        )
+                        self._append_chat(sender, msg)
                         if sender != self.username:
                             self._play_notification()
                     elif mt == "system":
@@ -216,7 +220,11 @@ class PartyAdminTUI:
             self.chat_history.append("[cyan]/notify[/cyan] — Toggle notification sounds")
             self.chat_history.append("[cyan]/lmute <user>[/cyan] — Hide their messages for you")
             self.chat_history.append("[cyan]/ldeafen <user>[/cyan] — Hide their activity for you")
+            self.chat_history.append("[cyan]/back[/cyan] — Close admin panel")
+            self.chat_history.append("[cyan]/exit[/cyan] — Exit admin panel")
             self.chat_history.append("[cyan]/close[/cyan] — Close admin panel")
+        elif action in ["/back", "/exit", "/close"]:
+            self.running = False
         else:
             self.chat_history.append(f"[yellow]Unknown command: {action}. Type /help[/yellow]")
 
@@ -276,14 +284,41 @@ class PartyAdminTUI:
         # Chat
         import shutil
         max_lines = max(5, shutil.get_terminal_size().lines - 15)
-        chat_content = "\n".join(self.chat_history[-max_lines:])
-        layout["chat"].update(Panel(Text.from_markup(chat_content), title="Chat & Activity", border_style="blue"))
+        chat_content = self._render_chat_feed(max_lines)
+        layout["chat"].update(Panel(chat_content, title="Chat & Activity", border_style="blue"))
         
         # Input
-        input_panel = Panel(f"> {self.input_text}█", border_style="green", title="Input (/help for all commands)")
+        input_panel = Panel(
+            f"> {self.input_text}█",
+            border_style="green",
+            title="Input (/help, /back, /exit, /close | Esc to close)",
+        )
         layout["input"].update(input_panel)
         
         return layout
+
+    def _render_chat_feed(self, max_lines):
+        chat_rows = []
+        for entry in self.chat_history[-max_lines:]:
+            if entry.startswith(CHAT_TOKEN):
+                try:
+                    payload = json.loads(entry[len(CHAT_TOKEN):])
+                except Exception:
+                    chat_rows.append(Text.from_markup(entry))
+                    continue
+
+                sender = payload.get("sender", "Unknown")
+                message = payload.get("message", "")
+                bubble = Panel(
+                    Text(escape(message)),
+                    title=f"{sender}",
+                    border_style="magenta" if sender == self.username else "cyan",
+                    expand=False,
+                )
+                chat_rows.append(Align.right(bubble) if sender == self.username else Align.left(bubble))
+            else:
+                chat_rows.append(Text.from_markup(entry))
+        return Group(*chat_rows) if chat_rows else Text("")
 
     async def input_loop(self, input_handler):
         while self.running:
@@ -292,10 +327,12 @@ class PartyAdminTUI:
                 if c:
                     if c == '\x08': # backspace
                         self.input_text = self.input_text[:-1]
+                    elif c == '\x1b': # esc
+                        self.running = False
                     elif c in ('\r', '\n'): # enter
                         if self.input_text:
                             if self.input_text.startswith('/'):
-                                if self.input_text == "/close":
+                                if self.input_text.strip().lower() in ["/close", "/back", "/exit"]:
                                     self.running = False
                                 else:
                                     self.handle_command(self.input_text)
