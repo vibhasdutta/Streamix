@@ -175,6 +175,16 @@ class PartyClient:
                             timestamp = playback.get("timestamp", 0)
                             state = playback.get("state", "playing")
                             
+                            if state == "closed":
+                                if getattr(self, 'mpv_process', None):
+                                    try: await self._send_mpv_command(["quit"])
+                                    except: pass
+                                    try: self.mpv_process.terminate()
+                                    except: pass
+                                    self.mpv_process = None
+                                    self.current_video_url = None
+                                continue  # Skip the rest of the sync logic
+                            
                             # Auto-launch or restart mpv if video changed
                             if url and hasattr(self, 'current_video_url') and self.current_video_url != url:
                                 if getattr(self, 'mpv_process', None):
@@ -273,7 +283,15 @@ class PartyClient:
                 self.chat_history.append(f"[green]Undeafened {target} (local).[/green]")
             else:
                 self.local_deafened.add(target)
-                self.chat_history.append(f"[yellow]Deafened {target} (local). Their chat & activity hidden for you.[/yellow]")
+                self.chat_history.append(f"[yellow]Deafened {target} (local). You will no longer hear their voice.[/yellow]")
+                
+        elif action == "/join":
+            if getattr(self, 'current_video_url', None) and getattr(self, 'mpv_process', None) is None:
+                self.chat_history.append("[dim italic]Re-joining the video stream...[/dim italic]")
+                # Timestamp 0 will be fixed instantly on the next sync tick from the host
+                self._launch_mpv(self.current_video_url, "Party Video", 0)
+            else:
+                self.chat_history.append("[dim italic]No active stream to join, or you are already watching.[/dim italic]")
                 
         elif action == "/users":
             if self.users:
@@ -412,8 +430,9 @@ class PartyClient:
                     live.update(self.generate_layout())
                     await asyncio.sleep(0.05)
                     if self.mpv_process and self.mpv_process.poll() is not None:
-                        # mpv closed manually by user
-                        self.running = False
+                        # mpv closed manually by user or by host changing episode
+                        # Don't close the chat — just clear the process so we don't keep polling
+                        self.mpv_process = None
         finally:
             input_handler.cleanup()
             # Kill mpv if still running (no point playing without sync)

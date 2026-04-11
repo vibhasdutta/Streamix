@@ -427,10 +427,10 @@ class PartyAdminTUI:
                         if current_title: payload["anime_title"] = current_title
                         await self.ws.send(json.dumps(payload, ensure_ascii=False))
                     elif not mpv_alive:
-                        # MPV is closed — tell clients to pause so they don't loop
+                        # MPV is closed — tell clients to close their players too
                         await self.ws.send(json.dumps({
                             "type": "sync",
-                            "state": "paused",
+                            "state": "closed",
                             "timestamp": 0
                         }))
                     
