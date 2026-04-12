@@ -45,6 +45,7 @@ class PartyClient:
         self.volume = self.config.get("volume", 100)
         self.notifications_enabled = self.config.get("notifications", True)
         self.chat_limit = self.config.get("chat_history_limit", 50)
+        self._last_sound_time = 0 # Cooldown for sounds
 
     def _append_chat(self, sender, message, ts=None):
         if not ts: ts = time.strftime("%H:%M")
@@ -87,11 +88,18 @@ class PartyClient:
     def _play_event_sound(self, filename):
         if not self.notifications_enabled:
             return
+            
+        # 2 second cooldown for sounds to prevent spam
+        now = time.time()
+        if now - getattr(self, '_last_sound_time', 0) < 2.0:
+            return
+        self._last_sound_time = now
+        
         try:
             from main import get_mpv_path
             mpv_path = get_mpv_path()
             if mpv_path:
-                sound_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sound_assests", filename)
+                sound_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sound_assets", filename)
                 if os.path.exists(sound_path):
                     subprocess.Popen([mpv_path, "--no-video", "--no-terminal", sound_path], 
                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -192,9 +200,9 @@ class PartyClient:
                         subtype = data.get("subtype")
                         self.chat_history.append(f"[dim italic]{escape(msg)}[/dim italic]")
                         
-                        if subtype == "join" and data.get("role") == "member" and data.get("actor") != self.username:
+                        if subtype == "join" and data.get("actor") != self.username:
                             self._play_event_sound("joinin.mp3")
-                        elif subtype == "leave" and data.get("role") == "member" and data.get("actor") != self.username:
+                        elif subtype == "leave" and data.get("actor") != self.username:
                             self._play_event_sound("leave.mp3")
                         
                     elif mt == "sync":
@@ -230,8 +238,9 @@ class PartyClient:
                             await self._send_mpv_command(["set_property", "pause", state == "paused"])
                             client_time = await asyncio.to_thread(self._get_mpv_property_sync, "time-pos")
                             
-                            # Only seek if we're out of sync by more than 2 seconds to avoid stuttering/frame drops
-                            if client_time is None or abs(client_time - timestamp) > 2.0:
+                            # Only seek if we're out of sync by more than 0.8 seconds (tighter sync)
+                            # Larger thresholds (e.g. 2.0s) lead to noticeable desynchronization
+                            if client_time is None or abs(client_time - timestamp) > 0.8:
                                 await self._send_mpv_command(["set_property", "time-pos", timestamp])
                             
                     elif mt == "kicked":
@@ -263,7 +272,7 @@ class PartyClient:
             self.running = False
 
     def _launch_mpv(self, url, title, timestamp):
-        from main import get_mpv_path
+        from main import get_mpv_path, get_streaming_headers
         mpv_path = get_mpv_path()
         if not mpv_path:
             self.chat_history.append("[bold red]mpv not found! Cannot sync video.[/bold red]")
@@ -274,11 +283,19 @@ class PartyClient:
             f"--title={title} (Watch Party Sync)",
             f"--start={timestamp}",
             f"--input-ipc-server={self.mpv_ipc_path}",
-            "--referrer=https://kwik.cx/",
-            "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "--fs",
-            url
         ]
+        
+        # Add shared headers and optimizations
+        args.extend(get_streaming_headers(url))
+        
+        # Additional buffer optimization for shared playback
+        args.extend([
+            "--demuxer-max-bytes=100MiB",
+            "--demuxer-readahead-secs=20",
+        ])
+        
+        args.append(url)
         
         self.mpv_process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
@@ -332,11 +349,27 @@ class PartyClient:
                 self.chat_history.append("[dim]No user list yet.[/dim]")
         
         elif action == "/help":
-            self.chat_history.append("[cyan]Ctrl+W[/cyan] — Scroll Up chat")
-            self.chat_history.append("[cyan]Ctrl+S[/cyan] — Scroll Down chat")
-            self.chat_history.append("[cyan]/users[/cyan] — List online users")
+            self.chat_history.append("[cyan]PgUp/PgDn[/cyan] — Scroll chat view")
+            self.chat_history.append("[cyan]Ctrl+V[/cyan] — Toggle Microphone (Mute)")
+            self.chat_history.append("[cyan]Ctrl+B[/cyan] — Toggle Voice (Deafen)")
+            self.chat_history.append("[cyan]/notification sounds <on|off>[/cyan] — Toggle all audio alerts (Chat, Join/Leave)")
             self.chat_history.append("[cyan]/close[/cyan] — Close this window")
             self.chat_history.append("[cyan]/help[/cyan] — Show this help")
+        elif action == "/notification":
+            if target.lower().startswith("sounds"):
+                # Handle "/notification sounds on" or "/notification sounds off"
+                sub_parts = target.split(" ")
+                val = sub_parts[1].lower() if len(sub_parts) > 1 else ("off" if self.notifications_enabled else "on")
+                
+                self.notifications_enabled = (val == "on")
+                # Persist to config
+                from config import update_client_config
+                update_client_config(notifications=self.notifications_enabled)
+                
+                status = "enabled" if self.notifications_enabled else "disabled"
+                self.chat_history.append(f"[yellow]All notification sounds are now {status}.[/yellow]")
+            else:
+                self.chat_history.append("[yellow]Usage: /notification sounds <on|off>[/yellow]")
         elif action in ["/exit", "/close"]:
             self.running = False
         else:
@@ -438,11 +471,11 @@ class PartyClient:
                                     )
                                 )
                             self.input_text = ""
-                    elif c == '\x17': # Ctrl+W (Scroll Up)
+                    elif c in ['PAGEUP', '\x17']: # PAGEUP or Ctrl+W
                         self.scroll_offset += 5
-                        if self.scroll_offset > len(self.chat_history):
-                            self.scroll_offset = len(self.chat_history)
-                    elif c == '\x13': # Ctrl+S (Scroll Down)
+                        # Clamp scroll
+                        self.scroll_offset = min(self.scroll_offset, max(0, len(self.chat_history) - 5))
+                    elif c in ['PAGEDOWN', '\x13']: # PAGEDOWN or Ctrl+S
                         self.scroll_offset = max(0, self.scroll_offset - 5)
                     else:
                         if c.isprintable():

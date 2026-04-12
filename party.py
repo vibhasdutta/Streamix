@@ -105,18 +105,30 @@ class WatchPartyServer:
                 await websocket.close(1008, "Banned")
                 return
 
-            # Get client IP from websocket (with X-Forwarded-For support for ngrok)
+            # Get client IP from websocket (multi-header check for proxies/ngrok)
             client_ip = "unknown"
             try:
-                # Check for X-Forwarded-For header (common for proxies like ngrok)
-                xfwd = websocket.request_headers.get("X-Forwarded-For")
-                if xfwd:
-                    # Take the first IP in the chain
-                    client_ip = xfwd.split(',')[0].strip()
-                else:
+                headers = websocket.request_headers
+                # Order of preference for proxy headers
+                potential_ips = [
+                    headers.get("X-Forwarded-For"),
+                    headers.get("X-Real-IP"),
+                    headers.get("CF-Connecting-IP"),
+                    headers.get("True-Client-IP")
+                ]
+                
+                for ip_str in potential_ips:
+                    if ip_str:
+                        # Take the first IP in cases of comma-separated chains
+                        client_ip = ip_str.split(',')[0].strip()
+                        break
+                
+                if client_ip == "unknown" or not client_ip:
                     client_ip = websocket.remote_address[0] if websocket.remote_address else "unknown"
-            except:
-                pass
+                
+                logger.info(f"Join request from {client_name}: Detected IP = {client_ip}")
+            except Exception as e:
+                logger.error(f"IP detection error for {client_name}: {e}")
 
             # Generate a safe Hash ID for display
             hash_id = hashlib.md5(client_ip.encode()).hexdigest()[:6].upper()

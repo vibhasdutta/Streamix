@@ -45,6 +45,7 @@ class PartyAdminTUI:
         self.notifications_enabled = self.config.get("notifications", True)
         self.chat_limit = self.config.get("chat_history_limit", 50)
         self._mpv_path = None # Cache for mpv path
+        self._last_sound_time = 0 # Cooldown for sounds
         
         # Try to load info from file
         try:
@@ -94,6 +95,12 @@ class PartyAdminTUI:
     def _play_event_sound(self, filename):
         if not self.notifications_enabled:
             return
+            
+        # 2 second cooldown for sounds to prevent spam
+        now = time.time()
+        if now - self._last_sound_time < 2.0:
+            return
+        self._last_sound_time = now
         
         try:
             if not self._mpv_path:
@@ -101,7 +108,7 @@ class PartyAdminTUI:
                 self._mpv_path = get_mpv_path()
             
             if self._mpv_path:
-                sound_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sound_assests", filename)
+                sound_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sound_assets", filename)
                 if os.path.exists(sound_path):
                     # Use Popen to play in background without blocking
                     subprocess.Popen([self._mpv_path, "--no-video", "--no-terminal", sound_path], 
@@ -155,7 +162,7 @@ class PartyAdminTUI:
                             continue
                         self._append_chat(sender, msg)
                         if sender != self.username:
-                            self._play_notification()
+                            self._play_event_sound("notification.mp3")
                             
                     elif mt == "chat_history":
                         history = data.get("history", [])
@@ -168,9 +175,9 @@ class PartyAdminTUI:
                         self.chat_history.append(f"[dim italic]{escape(msg)}[/dim italic]")
                         self.system_messages.append(msg)
                         
-                        if subtype == "join" and data.get("role") == "member" and data.get("actor") != self.username:
+                        if subtype == "join" and data.get("actor") != self.username:
                             self._play_event_sound("joinin.mp3")
-                        elif subtype == "leave" and data.get("role") == "member" and data.get("actor") != self.username:
+                        elif subtype == "leave" and data.get("actor") != self.username:
                             self._play_event_sound("leave.mp3")
                     elif mt == "error":
                         msg = data.get("message", "")
@@ -222,12 +229,28 @@ class PartyAdminTUI:
             self.chat_history.append("[cyan]/ban <user>[/cyan] — Ban from room")
             self.chat_history.append("[cyan]/unban <user>[/cyan] — Unban a user")
             self.chat_history.append("[bold]── Local (only for you) ──[/bold]")
-            self.chat_history.append("[cyan]Ctrl+W[/cyan] — Scroll Up chat")
-            self.chat_history.append("[cyan]Ctrl+S[/cyan] — Scroll Down chat")
-            self.chat_history.append("[cyan]/notify[/cyan] — Toggle notification sounds")
+            self.chat_history.append("[cyan]PgUp/PgDn[/cyan] — Scroll chat view")
+            self.chat_history.append("[cyan]Ctrl+V[/cyan] — Toggle Microphone (Mute)")
+            self.chat_history.append("[cyan]Ctrl+B[/cyan] — Toggle Voice (Deafen)")
+            self.chat_history.append("[cyan]/notification sounds <on|off>[/cyan] — Toggle all audio alerts (Chat, Join/Leave)")
             self.chat_history.append("[cyan]/close[/cyan] — Close this window")
         elif action in ["/exit", "/close"]:
             self.running = False
+        elif action == "/notification":
+            if target.lower().startswith("sounds"):
+                # Handle "/notification sounds on" or "/notification sounds off"
+                sub_parts = target.split(" ")
+                val = sub_parts[1].lower() if len(sub_parts) > 1 else ("off" if self.notifications_enabled else "on")
+                
+                self.notifications_enabled = (val == "on")
+                # Persist to config
+                from config import update_admin_config
+                update_admin_config(notifications=self.notifications_enabled)
+                
+                status = "enabled" if self.notifications_enabled else "disabled"
+                self.chat_history.append(f"[yellow]All notification sounds are now {status}.[/yellow]")
+            else:
+                self.chat_history.append("[yellow]Usage: /notification sounds <on|off>[/yellow]")
         else:
             self.chat_history.append(f"[yellow]Unknown command: {action}. Type /help[/yellow]")
 
@@ -348,11 +371,11 @@ class PartyAdminTUI:
                             else:
                                 await self.send_chat(self.input_text)
                             self.input_text = ""
-                    elif c == '\x17': # Ctrl+W (Scroll Up)
+                    elif c in ['PAGEUP', '\x17']: # PAGEUP or Ctrl+W
                         self.scroll_offset += 5
-                        if self.scroll_offset > len(self.chat_history):
-                            self.scroll_offset = len(self.chat_history)
-                    elif c == '\x13': # Ctrl+S (Scroll Down)
+                        # Clamp scroll
+                        self.scroll_offset = min(self.scroll_offset, max(0, len(self.chat_history) - 5))
+                    elif c in ['PAGEDOWN', '\x13']: # PAGEDOWN or Ctrl+S
                         self.scroll_offset = max(0, self.scroll_offset - 5)
                     else:
                         if c.isprintable():
@@ -392,44 +415,44 @@ class PartyAdminTUI:
                         if IS_WINDOWS:
                             # Read win32 pipe
                             with open(self.ipc_path, 'r+') as f:
+                                # Send multiple property requests and read them back
                                 f.write(json.dumps({"command": ["get_property", "pause"]}) + "\n")
-                                f.flush()
-                                res = json.loads(f.readline())
-                                pause_state = res.get("data", False)
-                                
                                 f.write(json.dumps({"command": ["get_property", "time-pos"]}) + "\n")
-                                f.flush()
-                                res = json.loads(f.readline())
-                                time_pos = res.get("data", 0.0)
-                                
                                 f.write(json.dumps({"command": ["get_property", "path"]}) + "\n")
-                                f.flush()
-                                res = json.loads(f.readline())
-                                current_url = res.get("data")
-                                
                                 f.write(json.dumps({"command": ["get_property", "media-title"]}) + "\n")
                                 f.flush()
-                                res = json.loads(f.readline())
-                                current_title = res.get("data")
+                                pause_state = json.loads(f.readline()).get("data", False)
+                                time_pos = json.loads(f.readline()).get("data", 0.0)
+                                current_url = json.loads(f.readline()).get("data")
+                                current_title = json.loads(f.readline()).get("data")
                         else:
-                            # Unix socket
+                            # Consolidate Unix IPC property requests
                             s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                            s.settimeout(0.2)
                             s.connect(self.ipc_path)
-                            s.sendall((json.dumps({"command": ["get_property", "pause"]}) + "\n").encode())
-                            res = json.loads(s.recv(1024).decode().split('\n')[0])
-                            pause_state = res.get("data", False)
                             
-                            s.sendall((json.dumps({"command": ["get_property", "time-pos"]}) + "\n").encode())
-                            res = json.loads(s.recv(1024).decode().split('\n')[0])
-                            time_pos = res.get("data", 0.0)
+                            commands = [
+                                ["get_property", "pause"],
+                                ["get_property", "time-pos"],
+                                ["get_property", "path"],
+                                ["get_property", "media-title"]
+                            ]
                             
-                            s.sendall((json.dumps({"command": ["get_property", "path"]}) + "\n").encode())
-                            res = json.loads(s.recv(1024).decode().split('\n')[0])
-                            current_url = res.get("data")
+                            for cmd in commands:
+                                s.sendall((json.dumps({"command": cmd}) + "\n").encode())
                             
-                            s.sendall((json.dumps({"command": ["get_property", "media-title"]}) + "\n").encode())
-                            res = json.loads(s.recv(1024).decode().split('\n')[0])
-                            current_title = res.get("data")
+                            # Read responses until we have enough newlines
+                            raw_data = b""
+                            while raw_data.count(b'\n') < len(commands):
+                                chunk = s.recv(4096)
+                                if not chunk: break
+                                raw_data += chunk
+                                    
+                            responses = raw_data.decode().split('\n')
+                            pause_state = json.loads(responses[0]).get("data", False)
+                            time_pos = json.loads(responses[1]).get("data", 0.0)
+                            current_url = json.loads(responses[2]).get("data")
+                            current_title = json.loads(responses[3]).get("data")
                             s.close()
                         mpv_alive = True
                     except Exception:
@@ -461,8 +484,8 @@ class PartyAdminTUI:
             except Exception:
                 pass
             
-            # Poll every 1 second
-            await asyncio.sleep(1)
+            # Poll every 0.33 seconds (3Hz) for tighter sync
+            await asyncio.sleep(0.33)
 
     async def run(self):
         from rich import box

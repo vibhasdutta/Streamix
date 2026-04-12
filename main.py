@@ -409,7 +409,33 @@ def get_mpv_path():
             return path
     return None
 
-def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=False, is_live=False, quality=None, ipc_server=None, start_time=0):
+def get_streaming_headers(url, provider=None):
+    """Generate optimal HTTP headers for a given stream URL/Provider."""
+    # Dynamic Referrer Logic
+    referrer = "https://miruro.to/" # Default
+    if "kwik.cx" in url:
+        referrer = "https://kwik.cx/"
+    elif provider and provider.lower() == "kiwi":
+        referrer = "https://kwik.cx/"
+    elif "bunny.net" in url:
+        referrer = "https://miruro.to/"
+        
+    headers = [
+        f"--referrer={referrer}",
+        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+        # Standard browser origin
+        "--http-header-fields=Origin: https://miruro.to"
+    ]
+    
+    # Global optimizations for online streams
+    optimizations = [
+        "--tls-verify=no",           # Skip verification if SNI/Certs are mismatched
+        "--cache-secs=60",           # Cache up to 60s ahead
+        "--hls-bitrate=max",         # Always aim for best HLS quality
+    ]
+    return headers + optimizations
+
+def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=False, is_live=False, quality=None, ipc_server=None, start_time=0, provider=None):
     """Platform-aware video playback using mpv exclusively.
     """
     mpv_path = get_mpv_path()
@@ -445,14 +471,10 @@ def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=Fal
             q = int(quality)
             args.append(f"--ytdl-format=bestvideo[height<={q}]+bestaudio/best[height<={q}]")
         
-        if not is_custom:
-            args.extend([
-                "--referrer=https://kwik.cx/",
-                "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            ])
-        else:
-            # Custom URLs (HLS/m3u8/DASH) still need a user-agent or many servers reject the request
-            args.append("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        # Add shared headers and optimizations
+        args.extend(get_streaming_headers(url, provider))
+        
+        if is_custom:
             # Better buffering for multi-stream HLS/DASH
             args.extend([
                 "--demuxer-max-bytes=150MiB",
@@ -645,6 +667,79 @@ def show_anime_grid(results):
         else:
             return selected
 
+def display_characters(anilist_id, anime_title):
+    page = 1
+    while True:
+        console.clear()
+        with status_after(f"[yellow]👥 Loading characters for [bold]{anime_title}[/bold] (Page {page})...[/yellow]"):
+            data = fetch_json(f"{API_BASE}/anime/{anilist_id}/characters?page={page}&per_page=12")
+            
+        if not data or not data.get("characters"):
+            console.print("[red]No characters found or failed to load.[/red]")
+            input("\nPress Enter to go back...")
+            return
+
+        total_chars = data.get("characters", [])
+        
+        table = Table(title=f"Characters & Voice Actors - {anime_title}", box=None, padding=(0, 2))
+        table.add_column("Character", style="bold cyan", no_wrap=False)
+        table.add_column("Role", style="dim italic")
+        table.add_column("Voice Actor (JP)", style="bold magenta")
+        
+        for edge in total_chars:
+            node = edge.get("node", {})
+            role = edge.get("role", "SUPPORTING")
+            va_list = edge.get("voiceActors", [])
+            va_name = va_list[0].get("name", {}).get("full", "N/A") if va_list else "N/A"
+            char_name = node.get("name", {}).get("full", "Unknown")
+            
+            table.add_row(char_name, role.title(), va_name)
+            
+        console.print(table)
+        console.print(Rule(style="dim cyan"))
+        
+        choices = []
+        if data.get("hasNextPage"):
+            choices.append(questionary.Choice("  ➡️  Next Page", value="next"))
+        if page > 1:
+            choices.append(questionary.Choice("  ⬅️  Previous Page", value="prev"))
+        choices.append(questionary.Choice("  🔙  Back to Details", value="back"))
+        
+        ans = questionary.select("Navigation:", choices=choices, style=QSTYLE).ask()
+        if ans == "back": break
+        elif ans == "next": page += 1
+        elif ans == "prev": page -= 1
+
+def display_recommendations(anilist_id, anime_title):
+    console.clear()
+    with status_after(f"[yellow]💡 Loading recommendations for [bold]{anime_title}[/bold]...[/yellow]"):
+        data = fetch_json(f"{API_BASE}/anime/{anilist_id}/recommendations?per_page=15")
+        
+    if not data or not data.get("recommendations"):
+        console.print("[red]No recommendations found.[/red]")
+        input("\nPress Enter to go back...")
+        return
+
+    nodes = data.get("recommendations", [])
+    
+    choices = []
+    for entry in nodes:
+        node = entry.get("mediaRecommendation", {})
+        if not node: continue
+        r_title = node.get("title", {}).get("english") or node.get("title", {}).get("romaji") or "Unknown"
+        score = node.get("averageScore", "?")
+        choices.append(questionary.Choice(f"  ✨  {_trunc(r_title, 50)} ([yellow]{score}%[/yellow])", value=node))
+        
+    choices.append(questionary.Separator())
+    choices.append(questionary.Choice("  🔙  Back to Details", value="back"))
+    
+    selected = questionary.select("You might also like:", choices=choices, style=QSTYLE).ask()
+    if selected == "back":
+        return
+    else:
+        # Recursively view recommendations
+        display_anime_details(selected)
+
 def display_anime_details(selected_anime):
     console.clear()
     console.print()
@@ -793,7 +888,9 @@ def display_anime_details(selected_anime):
                     _add_relation(deep_rel.get("node", {}), "FRANCHISE")
 
     opt_choices = [
-        questionary.Choice("  ▶️  Watch Episodes", value="watch")
+        questionary.Choice("  ▶️  Watch Episodes", value="watch"),
+        questionary.Choice("  👥  Characters & Staff", value="characters"),
+        questionary.Choice("  💡  Recommendations", value="recommendations")
     ]
     
     if anime_relations:
@@ -815,6 +912,12 @@ def display_anime_details(selected_anime):
     
     if action_val == "watch":
         return "watch", (t_str, anilist_id)
+    elif action_val == "characters":
+        display_characters(anilist_id, t_str)
+        return display_anime_details(selected_anime) # Loop back
+    elif action_val == "recommendations":
+        display_recommendations(anilist_id, t_str)
+        return display_anime_details(selected_anime) # Loop back
     elif isinstance(action_val, tuple) and action_val[0] == "relation":
         return "relation", action_val[1]
     
@@ -1016,7 +1119,15 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None,
                 # We save with the current resume_time
                 save_cache(t_str, anilist_id, session_provider, session_category, ep_num, total_eps=len(ep_list), status="Watching", mark_watched=False, resume_time=resume_time)
                 
-                final_time, dur = play_video(selected_url, t_str, ep_num, ipc_server=ipc_server_path, start_time=resume_time)
+                final_time, dur = play_video(
+                    selected_url, 
+                    anime_title=t_str, 
+                    episode_num=ep_num, 
+                    quality=selected_stream.get('quality'), 
+                    ipc_server=ipc_server_path, 
+                    start_time=resume_time,
+                    provider=session_provider
+                )
                 
                 # Check if this was the last episode
                 current_idx = next((i for i, e in enumerate(ep_list) if str(e.get('number')) == ep_num), -1)
@@ -1333,6 +1444,8 @@ def main():
         
         menu_choices = [
             questionary.Choice("  🔍  Search Anime", value="search"),
+            questionary.Choice("  🆕  New Releases", value="recent"),
+            questionary.Choice("  ⏰  Upcoming Anime", value="upcoming"),
             questionary.Choice("  🔥  Discover Trending", value="trending"),
             questionary.Choice("  🏆  Top Popular", value="popular")
         ]
@@ -1485,6 +1598,62 @@ def main():
             
             if not results:
                 console.print(Align.center("[red]❌ No anime found![/red]"))
+                time.sleep(1.5)
+                continue
+                
+            selected_anime = show_anime_grid(results)
+            while selected_anime:
+                action, payload = display_anime_details(selected_anime)
+                if action == "watch":
+                    t_str, anilist_id = payload
+                    handle_episode_flow(anilist_id, t_str, ipc_server_path=ipc_server_path)
+                    break
+                elif action == "relation":
+                    selected_anime = payload
+                else:
+                    break
+                    
+        elif choice == 'recent':
+            with status_after(f"[yellow]🆕 Fetching New Releases[/yellow]", center=True):
+                try:
+                    # New releases check every 2h
+                    data = fetch_json(f"{API_BASE}/recent", ttl_hours=2)
+                    results = data.get("results", [])
+                except Exception as e:
+                    console.print(f"[red]❌ Connection Error: {e}[/red]")
+                    console.print("[dim]Check 'data/logs/streamix_backend.log' for details.[/dim]")
+                    continue
+            
+            if not results:
+                console.print(Align.center("[red]❌ No recent releases found![/red]"))
+                time.sleep(1.5)
+                continue
+                
+            selected_anime = show_anime_grid(results)
+            while selected_anime:
+                action, payload = display_anime_details(selected_anime)
+                if action == "watch":
+                    t_str, anilist_id = payload
+                    handle_episode_flow(anilist_id, t_str, ipc_server_path=ipc_server_path)
+                    break
+                elif action == "relation":
+                    selected_anime = payload
+                else:
+                    break
+
+        elif choice == 'upcoming':
+            with status_after(f"[yellow]⏰ Fetching Upcoming Anime[/yellow]", center=True):
+                try:
+                    # Upcoming stays for 6h
+                    data = fetch_json(f"{API_BASE}/upcoming", ttl_hours=6)
+                    results = data.get("results", [])
+                except Exception as e:
+                    console.print(f"[red]❌ Connection Error: {e}[/red]")
+                    console.print("[dim]Check 'data/logs/streamix_backend.log' for details.[/dim]")
+                    continue
+            
+            if not results:
+                console.print(Align.center("[red]❌ No upcoming anime found![/red]"))
                 time.sleep(1.5)
                 continue
                 

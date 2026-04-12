@@ -1,8 +1,8 @@
-import base64, json, gzip, httpx, os
+import base64, json, gzip, httpx, os, re
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -475,6 +475,239 @@ async def get_schedule(
     }
     return _proxy_deep_images(response)
 
+
+# ─── Advanced Filter ─────────────────────────────────────────────────────────
+
+SORT_MAP = {
+    "SCORE_DESC": "SCORE_DESC",
+    "POPULARITY_DESC": "POPULARITY_DESC",
+    "TRENDING_DESC": "TRENDING_DESC",
+    "START_DATE_DESC": "START_DATE_DESC",
+    "FAVOURITES_DESC": "FAVOURITES_DESC",
+    "UPDATED_AT_DESC": "UPDATED_AT_DESC",
+}
+
+@app.get("/filter")
+async def filter_anime(
+    genre: Optional[str] = Query(None, description="Genre name, e.g. Action, Romance"),
+    tag: Optional[str] = Query(None, description="Tag name, e.g. Isekai, Time Skip"),
+    year: Optional[int] = Query(None, description="Season year, e.g. 2025"),
+    season: Optional[str] = Query(None, description="WINTER, SPRING, SUMMER, or FALL"),
+    format: Optional[str] = Query(None, description="TV, MOVIE, OVA, ONA, SPECIAL, MUSIC"),
+    status: Optional[str] = Query(None, description="RELEASING, FINISHED, NOT_YET_RELEASED, CANCELLED, HIATUS"),
+    sort: str = Query("POPULARITY_DESC", description="Sort order"),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(20, ge=1, le=50),
+):
+    """Advanced anime filter with genre, tag, year, season, format, status, and sort."""
+    # Build dynamic argument string
+    args = ["type: ANIME", f"sort: [{SORT_MAP.get(sort, 'POPULARITY_DESC')}]"]
+    variables = {"page": page, "perPage": per_page}
+
+    if genre:
+        args.append("genre: $genre")
+        variables["genre"] = genre
+    if tag:
+        args.append("tag: $tag")
+        variables["tag"] = tag
+    if year:
+        args.append("seasonYear: $seasonYear")
+        variables["seasonYear"] = year
+    if season:
+        args.append("season: $season")
+        variables["season"] = season.upper()
+    if format:
+        args.append("format: $format")
+        variables["format"] = format.upper()
+    if status:
+        args.append("status: $status")
+        variables["status"] = status.upper()
+
+    # Build variable type declarations
+    var_types = ["$page: Int", "$perPage: Int"]
+    if genre:
+        var_types.append("$genre: String")
+    if tag:
+        var_types.append("$tag: String")
+    if year:
+        var_types.append("$seasonYear: Int")
+    if season:
+        var_types.append("$season: MediaSeason")
+    if format:
+        var_types.append("$format: MediaFormat")
+    if status:
+        var_types.append("$status: MediaStatus")
+
+    gql = f"""
+    query ({', '.join(var_types)}) {{
+        Page(page: $page, perPage: $perPage) {{
+            pageInfo {{ total currentPage lastPage hasNextPage perPage }}
+            media({', '.join(args)}) {{
+                {MEDIA_LIST_FIELDS}
+            }}
+        }}
+    }}
+    """
+    data = await _anilist_query(gql, variables)
+    page_data = data.get("Page", {})
+    page_info = page_data.get("pageInfo", {})
+    response = {
+        "page": page_info.get("currentPage", page),
+        "perPage": page_info.get("perPage", per_page),
+        "total": page_info.get("total", 0),
+        "hasNextPage": page_info.get("hasNextPage", False),
+        "results": page_data.get("media", []),
+    }
+    return _proxy_deep_images(response)
+
+# ─── Anime Details (Metadata Extensions) ────────────────────────────────────
+
+@app.get("/anime/{anilist_id}/characters")
+async def get_anime_characters(
+    anilist_id: int,
+    page: int = Query(1, ge=1),
+    per_page: int = Query(25, ge=1, le=50),
+):
+    """Get paginated character list with voice actors for an anime."""
+    gql = """
+    query ($id: Int, $page: Int, $perPage: Int) {
+        Media(id: $id, type: ANIME) {
+            id
+            title { romaji english }
+            characters(sort: [ROLE, RELEVANCE], page: $page, perPage: $perPage) {
+                pageInfo { total currentPage lastPage hasNextPage perPage }
+                edges {
+                    role
+                    node {
+                        id
+                        name { full native userPreferred }
+                        image { large medium }
+                        description
+                        gender
+                        dateOfBirth { year month day }
+                        age
+                        favourites
+                        siteUrl
+                    }
+                    voiceActors(language: JAPANESE) {
+                        id
+                        name { full native }
+                        image { large }
+                        languageV2
+                    }
+                }
+            }
+        }
+    }
+    """
+    data = await _anilist_query(gql, {"id": anilist_id, "page": page, "perPage": per_page})
+    media = data.get("Media")
+    if not media:
+        raise HTTPException(status_code=404, detail="Anime not found")
+    chars = media.get("characters", {})
+    page_info = chars.get("pageInfo", {})
+    response = {
+        "page": page_info.get("currentPage", page),
+        "perPage": page_info.get("perPage", per_page),
+        "total": page_info.get("total", 0),
+        "hasNextPage": page_info.get("hasNextPage", False),
+        "characters": chars.get("edges", []),
+    }
+    return _proxy_deep_images(response)
+
+
+@app.get("/anime/{anilist_id}/relations")
+async def get_anime_relations(anilist_id: int):
+    """Get all related anime/manga for an anime (sequels, prequels, side stories, etc.)."""
+    gql = """
+    query ($id: Int) {
+        Media(id: $id, type: ANIME) {
+            id
+            title { romaji english }
+            relations {
+                edges {
+                    relationType(version: 2)
+                    node {
+                        id
+                        title { romaji english native }
+                        coverImage { large }
+                        bannerImage
+                        format
+                        type
+                        status
+                        episodes
+                        chapters
+                        meanScore
+                        averageScore
+                        popularity
+                        startDate { year month day }
+                    }
+                }
+            }
+        }
+    }
+    """
+    data = await _anilist_query(gql, {"id": anilist_id})
+    media = data.get("Media")
+    if not media:
+        raise HTTPException(status_code=404, detail="Anime not found")
+    response = {
+        "id": media["id"],
+        "title": media["title"],
+        "relations": media.get("relations", {}).get("edges", []),
+    }
+    return _proxy_deep_images(response)
+
+
+@app.get("/anime/{anilist_id}/recommendations")
+async def get_anime_recommendations(
+    anilist_id: int,
+    page: int = Query(1, ge=1),
+    per_page: int = Query(10, ge=1, le=25),
+):
+    """Get paginated community recommendations for an anime."""
+    gql = """
+    query ($id: Int, $page: Int, $perPage: Int) {
+        Media(id: $id, type: ANIME) {
+            id
+            title { romaji english }
+            recommendations(sort: RATING_DESC, page: $page, perPage: $perPage) {
+                pageInfo { total currentPage lastPage hasNextPage perPage }
+                nodes {
+                    rating
+                    mediaRecommendation {
+                        id
+                        title { romaji english native }
+                        coverImage { large extraLarge }
+                        bannerImage
+                        format
+                        episodes
+                        status
+                        meanScore
+                        averageScore
+                        popularity
+                        genres
+                        startDate { year }
+                    }
+                }
+            }
+        }
+    }
+    """
+    data = await _anilist_query(gql, {"id": anilist_id, "page": page, "perPage": per_page})
+    media = data.get("Media")
+    if not media:
+        raise HTTPException(status_code=404, detail="Anime not found")
+    recs = media.get("recommendations", {})
+    page_info = recs.get("pageInfo", {})
+    response = {
+        "page": page_info.get("currentPage", page),
+        "perPage": page_info.get("perPage", per_page),
+        "total": page_info.get("total", 0),
+        "hasNextPage": page_info.get("hasNextPage", False),
+        "recommendations": recs.get("nodes", []),
+    }
+    return _proxy_deep_images(response)
 
 # ─── Anime Details ───────────────────────────────────────────────────────────
 
