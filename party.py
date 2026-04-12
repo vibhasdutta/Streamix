@@ -8,6 +8,9 @@ from utils.os_detector import IS_WINDOWS
 
 logging.basicConfig(level=logging.ERROR)
 
+# Suppress noisy websocket debug logs at the top level
+logging.getLogger("websockets").setLevel(logging.ERROR)
+
 class WatchPartyServer:
     def __init__(self, room_name, host_name, max_users=10):
         self.room_name = room_name
@@ -76,7 +79,7 @@ class WatchPartyServer:
         
         try:
             # First message should be join
-            init_msg_str = await asyncio.wait_for(websocket.recv(), timeout=5.0)
+            init_msg_str = await asyncio.wait_for(websocket.recv(), timeout=10.0)
             init_msg = json.loads(init_msg_str)
             
             if init_msg.get('type') != 'join':
@@ -261,6 +264,12 @@ class WatchPartyServer:
                 # If host leaves, completely terminate the server thereby disconnecting everyone
                 if role == 'host':
                     logger.info("Host disconnected. Shutting down global server.")
+                    # Close all remaining client connections gracefully
+                    for ws in list(self.clients.keys()):
+                        try:
+                            await ws.close(1001, "Host ended the party")
+                        except:
+                            pass
                     import os
                     os._exit(0)
 
@@ -288,6 +297,13 @@ logger = logging.getLogger("streamix_party")
 logging.getLogger("websockets.server").setLevel(logging.CRITICAL)
 logging.getLogger("websockets").setLevel(logging.CRITICAL)
 
+async def _health_check(connection, request):
+    """Handle non-WebSocket HTTP requests (ngrok health pings, browser checks, etc.)
+    Return None to proceed with the normal WebSocket handshake.
+    In websockets v16, return a Response to reject the upgrade."""
+    # All requests proceed to WebSocket handshake
+    return None
+
 async def serve(room_name, host_name, max_users, port=9000):
     server_logic = WatchPartyServer(room_name, host_name, max_users)
     server = await websockets.serve(
@@ -298,12 +314,16 @@ async def serve(room_name, host_name, max_users, port=9000):
         ping_timeout=20,
         close_timeout=10,
         max_size=2**20,  # 1MB max message
-        origins=[None],  # Accept connections without Origin header (Python clients via ngrok)
+        process_request=_health_check,
+        # No origin restriction — allow connections from any origin
+        # (Python clients, ngrok proxy, localhost, etc.)
     )
+    logger.info(f"WebSocket server listening on 0.0.0.0:{port}")
     return server
 
 def start_server_and_tunnel(room_name, host_name, max_users=10, port=9000):
     logger.info(f"Starting watch party server for room: {room_name}")
+    print(f"[Party] Starting watch party: {room_name}")
     
     # Aggressive cleanup of any zombie ngrok processes before starting
     import os
@@ -313,15 +333,27 @@ def start_server_and_tunnel(room_name, host_name, max_users=10, port=9000):
         os.system("pkill -9 ngrok >/dev/null 2>&1")
         
     try:
-        # Start ngrok
+        # Fix Python 3.10+ asyncio warning
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # 1. Start WebSocket server FIRST so port 9000 is ready for connections
+        logger.info("Starting WebSocket server...")
+        print(f"[Party] Starting WebSocket server on port {port}...")
+        server = loop.run_until_complete(serve(room_name, host_name, max_users, port))
+        print(f"[Party] WebSocket server listening on port {port}")
+        
+        # 2. THEN open ngrok tunnel (so it points to an already-listening port)
         logger.info(f"Opening ngrok tunnel on port {port}...")
+        print("[Party] Opening ngrok tunnel...")
         
         # Use http instead of tcp to avoid auth-token requirements and raw TCP ping issues
         tunnel = ngrok.connect(port, "http")
         public_url = tunnel.public_url.replace("https://", "wss://").replace("http://", "ws://")
         logger.info(f"ngrok tunnel opened successfully: {public_url}")
+        print(f"[Party] Tunnel ready: {public_url}")
         
-        # Save room info for the admin client to read
+        # 3. Save room info for the admin client to read
         json_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
         os.makedirs(json_dir, exist_ok=True)
         party_info_path = os.path.join(json_dir, "party_info.json")
@@ -333,13 +365,7 @@ def start_server_and_tunnel(room_name, host_name, max_users=10, port=9000):
                 "max_users": max_users
             }, f)
             
-        logger.info("Starting WebSocket server...")
-        
-        # Fix Python 3.10+ asyncio warning
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        server = loop.run_until_complete(serve(room_name, host_name, max_users, port))
+        print(f"[Party] Room info saved. Party is live!")
         
         try:
             loop.run_forever()
@@ -362,7 +388,7 @@ def start_server_and_tunnel(room_name, host_name, max_users=10, port=9000):
     except Exception as e:
         err_msg = f"Failed to start party server or ngrok tunnel:\n{traceback.format_exc()}"
         logger.error(err_msg)
-        print(f"Error: {e}")
+        print(f"[Party] Error: {e}")
 
 if __name__ == "__main__":
     import sys
