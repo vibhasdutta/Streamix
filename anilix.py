@@ -487,25 +487,32 @@ def load_cache():
             return {}
     return {}
 
-def save_cache(title, anilist_id, provider, category, episode):
+def save_cache(title, anilist_id, provider, category, episode, total_eps=0, status="Watching", mark_watched=False):
     cache = load_cache()
     a_id = str(anilist_id)
     if a_id not in cache:
         cache[a_id] = {
             "title": title,
             "anilist_id": anilist_id,
-            "watched": []
+            "watched": [],
+            "status": "Watching",
+            "total_eps": total_eps
         }
     
     entry = cache[a_id]
+    if total_eps > 0:
+        entry["total_eps"] = total_eps
+    entry["status"] = status
     entry["provider"] = provider
     entry["category"] = category
     entry["last_watched_ep"] = str(episode)
     entry["timestamp"] = time.time()
     
-    # Store all watched episodes (as a set-like list)
+    # Detailed logic: 
+    # 'watched' array is for the ✅ checkboxes (episodes fully completed).
+    # 'last_watched_ep' is for the ▶️ indicator (where the user is currently or was last).
     if "watched" not in entry: entry["watched"] = []
-    if str(episode) not in entry["watched"]:
+    if mark_watched and str(episode) not in entry["watched"]:
         entry["watched"].append(str(episode))
         
     try:
@@ -573,7 +580,6 @@ def show_anime_grid(results):
 
 def display_anime_details(selected_anime):
     console.clear()
-    console.print(Align.center(Panel.fit("[bold cyan]✨ ANILIX ✨[/bold cyan]", border_style="cyan", box=box.ROUNDED)))
     
     anilist_id = selected_anime.get("id")
     # Fetch full info (with caching)
@@ -594,7 +600,7 @@ def display_anime_details(selected_anime):
     
     # ── Big Title ──
     console.print()
-    console.print(Align.center(Text(f"  {t_str}  ", style="bold white on dark_blue")))
+    console.print(Align.center(Panel.fit(f"[bold cyan]{t_str}[/bold cyan]", border_style="blue", box=box.ROUNDED)))
     if t_romaji and t_romaji != t_str:
         console.print(Align.center(f"[dim italic]{t_romaji}[/dim italic]"))
     if t_native:
@@ -602,7 +608,7 @@ def display_anime_details(selected_anime):
     console.print()
     
 
-    # ── Score + Quick Stats Line ──
+    # ── Quick Stats Grid ──
     status = selected_anime.get("status", "Unknown")
     episodes = selected_anime.get("episodes", "?")
     season = selected_anime.get("season", "")
@@ -613,43 +619,58 @@ def display_anime_details(selected_anime):
     favourites = selected_anime.get("favourites", "?")
     genres = selected_anime.get("genres", [])
     
-    stats_table = Table(show_header=False, box=box.SIMPLE_HEAVY, expand=False, padding=(0, 3))
-    stats_table.add_column("Label", style="bold cyan")
-    stats_table.add_column("Value", style="white")
-    
-    stats_table.add_row("⭐ Score", score_bar(avg_score))
-    stats_table.add_row("📺 Status", f"[bold yellow]{status}[/bold yellow]")
-    stats_table.add_row("🎬 Episodes", f"[bold green]{episodes}[/bold green]")
-    stats_table.add_row("📅 Season", f"[bold blue]{season} {year}[/bold blue]")
-    stats_table.add_row("🎥 Format", f"{fmt}")
-    stats_table.add_row("❤️  Favourites", f"{favourites}")
-    stats_table.add_row("📈 Popularity", f"{popularity}")
-    
-    # Studios
     studios_data = selected_anime.get("studios", {}).get("nodes", [])
     studio_names = [s.get("name", "") for s in studios_data if s.get("isAnimationStudio")]
-    if studio_names:
-        stats_table.add_row("🏢 Studio", f"[bold magenta]{', '.join(studio_names)}[/bold magenta]")
     
-    console.print(Align.center(stats_table))
+    # Title Case Status (e.g. "Releasing" instead of "RELEASING")
+    status_fmt = str(status).title().replace("_", " ") if status else "Unknown"
+    score_fmt = f"{avg_score/10.0:.1f} / 10" if avg_score else "N/A"
+    
+    # Format side-by-side strings
+    left_stats = f"""[bold yellow]📺 Status:[/bold yellow] {status_fmt}
+    [bold green]🎬 Episodes:[/bold green] {episodes}
+    [bold blue]📅 Season:[/bold blue] {season} {year}
+    [bold cyan]🎥 Format:[/bold cyan] {fmt}"""
+
+    right_stats = f"""[bold magenta]⭐ Score:[/bold magenta] {score_fmt}
+    [bold red]❤️ Favourites:[/bold red] {favourites}
+    [bold bright_cyan]📈 Popularity:[/bold bright_cyan] {popularity}
+    [bold magenta]🏢 Studio:[/bold magenta] {', '.join(studio_names) if studio_names else 'N/A'}"""
+
+    # Grid for stats
+    stats_grid = Table.grid(expand=False, padding=(0, 6))
+    stats_grid.add_row(left_stats, right_stats)
+    
+    details_panel = Panel(
+        stats_grid, 
+        title="[bold white]Anime Information[/bold white]", 
+        border_style="cyan",
+        box=box.ROUNDED,
+        padding=(1, 4)
+    )
+    console.print(Align.center(details_panel))
+
     # ── Genres ──
     if genres:
-        genre_tags = "  ".join([f"[bold white on dark_green] {g} [/bold white on dark_green]" for g in genres])
+        genre_tags = " ".join([f"[bold black on bright_cyan] {g} [/bold black on bright_cyan]" for g in genres])
         console.print()
         console.print(Align.center(genre_tags))
     
-    # ── Description ──
+    # ── Synopsis ──
     description = selected_anime.get("description", "")
     if description:
-        # Clean up HTML tags from description
         import re
         clean_desc = re.sub(r'<[^>]+>', '', description).strip()
-        # No truncation for synopsis
+        synopsis_panel = Panel(
+            clean_desc,
+            title="[bold white]Synopsis[/bold white]",
+            border_style="dim",
+            box=box.ROUNDED,
+            width=min(90, console.width - 4),
+            padding=(1, 2)
+        )
         console.print()
-        console.print(Align.center(Rule("Synopsis", style="cyan")))
-        console.print()
-        # Keep descriptions clean without excessive framing
-        console.print(clean_desc, width=min(90, console.width - 4), justify="center")
+        console.print(Align.center(synopsis_panel))
     
     # ── Next Airing ──
     next_ep = selected_anime.get("nextAiringEpisode")
@@ -659,7 +680,7 @@ def display_anime_details(selected_anime):
         days = time_left // 86400
         hours = (time_left % 86400) // 3600
         console.print()
-        console.print(Align.center(f"[bold yellow]⏰ Next Episode: {ep_num} airing in {days}d {hours}h[/bold yellow]"))
+        console.print(Align.center(Panel.fit(f"[bold yellow]⏰ Next Episode: {ep_num} airing in {days}d {hours}h[/bold yellow]", border_style="yellow")))
     
     console.print()
     return t_str, anilist_id
@@ -822,17 +843,29 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None,
         while True:
             selected_url = selected_stream.get("url")
             if selected_url:
+                # 1. Instant update to mark as 'Currently Watching' (▶️ indicator)
+                # We set mark_watched=False so the checkbox doesn't appear until it's actually finished
+                save_cache(t_str, anilist_id, session_provider, session_category, ep_num, total_eps=len(ep_list), status="Watching", mark_watched=False)
+                
                 play_video(selected_url, t_str, ep_num, ipc_server=ipc_server_path)
                 
-                save_cache(t_str, anilist_id, session_provider, session_category, ep_num)
+                # Check if this was the last episode
+                current_idx = next((i for i, e in enumerate(ep_list) if str(e.get('number')) == ep_num), -1)
+                is_last = (current_idx != -1 and current_idx + 1 == len(ep_list))
+
+                # 2. Final update to mark as 'Completed' (✅ checkbox)
+                save_cache(t_str, anilist_id, session_provider, session_category, ep_num, total_eps=len(ep_list), status="Completed" if is_last else "Watching", mark_watched=True)
             
                 # --- Auto Next Logic ---
-                current_idx = next((i for i, e in enumerate(ep_list) if str(e.get('number')) == ep_num), -1)
-                if current_idx != -1 and current_idx + 1 < len(ep_list):
+                if not is_last:
                     next_ep = ep_list[current_idx + 1]
                     next_num = str(next_ep.get('number'))
                     
                     if auto_play:
+                        # 3. Pre-update the 'Currently Watching' indicator for the NEXT episode
+                        # This ensures the ▶️ moves to the next ep even during the 10s countdown
+                        save_cache(t_str, anilist_id, session_provider, session_category, next_num, total_eps=len(ep_list), status="Watching", mark_watched=False)
+                        
                         console.print(f"\n[bold green]✅ Episode Finished[/bold green]")
 
                         is_windows = IS_WINDOWS
@@ -840,33 +873,27 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None,
                         
                         if is_windows:
                             import msvcrt
-                            paused = False
-                            time_left = 3.0
+                            time_left = 10.0
                             start_time = time.time()
                             
-                            while time_left > 0:
+                            while time_left > 0 and auto_play:
                                 display = int(time_left) + 1
-                                if paused:
-                                    console.print(f"[bold yellow]⏭️  Auto-Play PAUSED[/bold yellow] ([cyan]'p' to Resume[/cyan] | [red]'c' to Cancel[/red] | [green]Enter to Play[/green])        ", end="\r")
-                                else:
-                                    console.print(f"[bold yellow]⏭️  Launching Episode {next_num} in {display}s[/bold yellow] ([cyan]'p' to Pause[/cyan] | [red]'c' to Cancel[/red] | [green]Enter to Play[/green])        ", end="\r")
+                                auto_text = "ON" if auto_play else "OFF"
+                                console.print(f"[bold yellow]⏭️  Next Episode {next_num} in {display}s ({auto_text})[/bold yellow] ([red]'b' to Select Ep[/red] | [yellow]'s' to Toggle Auto-Play[/yellow])        ", end="\r")
                                 
                                 if msvcrt.kbhit():
                                     char = msvcrt.getch().decode("utf-8", "ignore").lower()
-                                    if char == 'c':
+                                    if char == 'b':
                                         should_play = False
                                         break
-                                    elif char == 'p':
-                                        paused = not paused
-                                        if not paused:
-                                            start_time = time.time() - (3.0 - time_left)
+                                    elif char == 's':
+                                        auto_play = not auto_play
                                     elif char in ['\r', '\n', ' ']:
                                         should_play = True
                                         break
                                 
                                 time.sleep(0.05)
-                                if not paused:
-                                    time_left = 3.0 - (time.time() - start_time)
+                                time_left = 10.0 - (time.time() - start_time)
                             
                             if time_left <= 0:
                                 should_play = True
@@ -882,33 +909,27 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None,
                             old_settings = termios.tcgetattr(fd)
                             try:
                                 tty.setcbreak(fd)
-                                paused = False
-                                time_left = 3.0
+                                time_left = 10.0
                                 start_time = time.time()
                                 
-                                while time_left > 0:
+                                while time_left > 0 and auto_play:
                                     display = int(time_left) + 1
-                                    if paused:
-                                        console.print(f"[bold yellow]⏭️  Auto-Play PAUSED[/bold yellow] ([cyan]'p' to Resume[/cyan] | [red]'c' to Cancel[/red] | [green]Enter to Play[/green])        ", end="\r")
-                                    else:
-                                        console.print(f"[bold yellow]⏭️  Launching Episode {next_num} in {display}s[/bold yellow] ([cyan]'p' to Pause[/cyan] | [red]'c' to Cancel[/red] | [green]Enter to Play[/green])        ", end="\r")
+                                    auto_text = "ON" if auto_play else "OFF"
+                                    console.print(f"[bold yellow]⏭️  Next Episode {next_num} in {display}s ({auto_text})[/bold yellow] ([red]'b' to Select Ep[/red] | [yellow]'s' to Toggle Auto-Play[/yellow])        ", end="\r")
                                     
                                     dr, _, _ = select.select([sys.stdin], [], [], 0.05)
                                     if dr:
                                         char = sys.stdin.read(1).lower()
-                                        if char == 'c':
+                                        if char == 'b':
                                             should_play = False
                                             break
-                                        elif char == 'p':
-                                            paused = not paused
-                                            if not paused:
-                                                start_time = time.time() - (3.0 - time_left)
+                                        elif char == 's':
+                                            auto_play = not auto_play
                                         elif char in ['\r', '\n', ' ']:
                                             should_play = True
                                             break
                                     
-                                    if not paused:
-                                        time_left = 3.0 - (time.time() - start_time)
+                                    time_left = 10.0 - (time.time() - start_time)
                                 
                                 if time_left <= 0:
                                     should_play = True
@@ -916,11 +937,13 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None,
                                 console.print()
                                 
                                 if not should_play:
-                                    console.print(f"[bold red]🛑 Auto-Play Cancelled[/bold red]")
                                     break
                             finally:
                                 termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
                     else:
+                        # Pre-update the indicator for solo mode too
+                        save_cache(t_str, anilist_id, session_provider, session_category, next_num, total_eps=len(ep_list), status="Watching", mark_watched=False)
+                        
                         console.print(f"\n[bold green]✅ Episode Finished![/bold green]")
                         should_play = questionary.confirm(f"Play Episode {next_num} next?", default=True).ask()
                         
@@ -947,6 +970,11 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None,
                     else:
                         break
                 else:
+                    # End of series
+                    console.print()
+                    console.print(Align.center(Panel.fit("[bold green]🎉 SERIES COMPLETED! 🎉[/bold green]", border_style="green", box=box.ROUNDED)))
+                    console.print(Align.center("[dim]You have watched all available episodes of this series.[/dim]"))
+                    time.sleep(2.5)
                     break
 
 def main():
@@ -958,7 +986,7 @@ def main():
     
     # ── Mode Selection ──
     console.clear()
-    console.print(Align.center(Panel.fit(f"[bold cyan]✨ ANILIX v{VERSION} | TERMINAL ANIME INTERFACE ✨[/bold cyan]", border_style="cyan", box=box.ROUNDED)))
+    console.print(Align.center(Panel.fit("[bold magenta]How do you want to watch?[/bold magenta]", border_style="magenta", box=box.ROUNDED)))
     
     mode = questionary.select(
         "How do you want to watch?",
@@ -1099,14 +1127,14 @@ def main():
         console.print()
         console.clear()
         
-        mode_label = "[bold green]PARTY HOST[/bold green] 🎉" if party_active else "[bold blue]SOLO[/bold blue] 🎬"
-        console.print(Align.center(Panel.fit(f"[bold cyan]✨ ANILIX v{VERSION}[/bold cyan] | {mode_label}", border_style="cyan", box=box.ROUNDED)))
+        console.print(Align.center(Panel.fit("[bold magenta]✨ ANILIX v1.0.0 ✨[/bold magenta]", border_style="magenta", box=box.ROUNDED)))
         
         cache = load_cache()
         
         menu_choices = [
             questionary.Choice("🔍 Search Anime", value="search"),
-            questionary.Choice("🔥 Discover Trending", value="trending")
+            questionary.Choice("🔥 Discover Trending", value="trending"),
+            questionary.Choice("🏆 Top Popular", value="popular")
         ]
         if cache:
             menu_choices.append(questionary.Choice("📚 View Watch History", value="history"))
@@ -1178,7 +1206,7 @@ def main():
                 if not custom_path:
                     continue
             else:
-                prompt_text = "Enter live stream URL:" if is_live_stream else "Enter video URL:"
+                prompt_text = "Enter live stream URL (leave blank to go back):" if is_live_stream else "Enter video URL (leave blank to go back):"
                 custom_path = questionary.text(prompt_text).ask()
                 if not custom_path:
                     continue
@@ -1220,19 +1248,23 @@ def main():
             if search_query_choices:
                 search_query_choices.append(questionary.Separator())
             search_query_choices.append(questionary.Choice("🆕 New Search", value="new"))
+            search_query_choices.append(questionary.Separator())
+            search_query_choices.append(questionary.Choice("🔙 Back", value="back"))
             
             if search_history:
                 query_choice = questionary.select("Search Anime:", choices=search_query_choices).ask()
+                if query_choice == "back" or query_choice is None:
+                    continue
                 if query_choice == "new":
-                    query = questionary.text("Enter anime title:").ask()
+                    query = questionary.text("Enter anime title (leave blank to go back):").ask()
                 else:
                     query = query_choice
             else:
-                query = questionary.text("Enter anime title:").ask()
+                query = questionary.text("Enter anime title (leave blank to go back):").ask()
                 
             if not query:
-                search_history.pop(0) if search_history else None
                 continue
+                
             if query not in search_history:
                 search_history.insert(0, query)
                 
@@ -1277,6 +1309,27 @@ def main():
                 t_str, anilist_id = display_anime_details(selected_anime)
                 handle_episode_flow(anilist_id, t_str, ipc_server_path=ipc_server_path)
                 
+        elif choice == 'popular':
+            with status_after(f"[yellow]🏆 Fetching Popular Anime[/yellow]", center=True):
+                try:
+                    # Popular stats stay for 6h
+                    data = fetch_json(f"{API_BASE}/popular", ttl_hours=6)
+                    results = data.get("results", [])
+                except Exception as e:
+                    console.print(f"[red]❌ Connection Error: {e}[/red]")
+                    console.print("[dim]Check '.logs/anilix_backend.log' for details.[/dim]")
+                    continue
+            
+            if not results:
+                console.print(Align.center("[red]❌ No popular anime found![/red]"))
+                time.sleep(1.5)
+                continue
+                
+            selected_anime = show_anime_grid(results)
+            if selected_anime:
+                t_str, anilist_id = display_anime_details(selected_anime)
+                handle_episode_flow(anilist_id, t_str, ipc_server_path=ipc_server_path)
+                
         elif choice == 'history' and cache:
             console.clear()
             console.print(Align.center(Panel.fit("[bold cyan]📚 WATCH HISTORY[/bold cyan]", border_style="cyan", box=box.ROUNDED)))
@@ -1289,8 +1342,15 @@ def main():
                 title = item.get("title", "Unknown")
                 prov = item.get("provider", "?")
                 ep = item.get("last_watched_ep", "?")
+                status = item.get("status", "Watching")
+                watched_count = len(item.get("watched", []))
+                total_eps = item.get("total_eps", 0)
+                
+                progress = f" ({watched_count}/{total_eps})" if total_eps > 0 else ""
+                status_tag = f" [Completed]" if status == "Completed" else f" [{watched_count}/{total_eps}]"
+                
                 h_choices.append(questionary.Choice(
-                    f"{title} | {prov.upper()} (Ep {ep})",
+                    f"{title} | {prov.upper()} (Ep {ep}){status_tag}",
                     value=item
                 ))
             
