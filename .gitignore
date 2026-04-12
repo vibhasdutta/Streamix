@@ -11,7 +11,5 @@ wheels/
 
 
 # misc files
-.cache/
 uv.lock
-.logs/
-.json/
+data/

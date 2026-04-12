@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-app = FastAPI(title="Anilix API", version="2.0")
+app = FastAPI(title="Streamix API", version="2.0")
 
 # --- Security Configuration ---
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "").split(",")
@@ -184,6 +184,20 @@ MEDIA_FULL_FIELDS = """
                 status
                 episodes
                 meanScore
+                relations {
+                    edges {
+                        relationType(version: 2)
+                        node {
+                            id
+                            title { romaji english native }
+                            type
+                            format
+                            status
+                            episodes
+                            meanScore
+                        }
+                    }
+                }
             }
         }
     }

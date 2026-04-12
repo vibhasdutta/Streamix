@@ -1,4 +1,4 @@
-"""Shared utility helpers for Anilix."""
+"""Shared utility helpers for Streamix."""
 
 from .os_detector import (
     IS_LINUX,

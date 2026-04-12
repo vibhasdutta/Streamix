@@ -11,7 +11,6 @@ import hashlib
 from pathlib import Path
 from rich.console import Console
 from rich.table import Table
-from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.align import Align
 from rich.text import Text
@@ -22,6 +21,7 @@ from rich.spinner import Spinner
 from rich.columns import Columns
 from rich import box
 import questionary
+from questionary import Style as QStyle
 from contextlib import contextmanager
 from utils.os_detector import (
     IS_MACOS,
@@ -34,16 +34,37 @@ from utils.os_detector import (
 )
 
 API_BASE = "http://localhost:8000"
-JSON_DIR = Path(".json")
+JSON_DIR = Path("data")
 JSON_DIR.mkdir(exist_ok=True)
 CACHE_FILE = str(JSON_DIR / "recent_watch.json")
-VERSION = "1.0.0"
-CACHE_DIR = Path(".cache")
+CACHE_DIR = JSON_DIR / "cache"
 CACHE_DIR.mkdir(exist_ok=True)
+
 console = Console()
 backend_process = None
 party_proc = None
 active_subprocesses = []
+VERSION = "1.0.0"
+PROJECT_NAME = "STREAMIX"
+
+# ── Premium Questionary Theme ──
+QSTYLE = QStyle([
+    ("qmark",        "fg:#E040FB bold"),       # Purple question mark
+    ("question",     "fg:#FFFFFF bold"),        # White question text  
+    ("answer",       "fg:#00E5FF bold"),        # Cyan confirmed answer
+    ("pointer",      "fg:#E040FB bold"),        # Purple arrow ❯
+    ("highlighted",  "fg:#E040FB bold"),        # Highlighted hover
+    ("selected",     "fg:#00E5FF"),             # Multi-select check
+    ("separator",    "fg:#555555"),             # Dim separators
+    ("instruction",  "fg:#777777 italic"),      # Dim instructions
+    ("text",         "fg:#CCCCCC"),             # Default text
+])
+
+def _trunc(text, width=35):
+    """Truncate text to width with ellipsis."""
+    if not text:
+        return ""
+    return (text[:width-1] + "…") if len(text) > width else text
 
 def fetch_json(url, params=None, ttl_hours=24):
     """Fetch JSON from API with persistent disk caching."""
@@ -96,12 +117,12 @@ def status_after(text, center=False):
         yield
 
 def stop_backend():
-    """Full cleanup of ALL Anilix processes: backend, party server, ngrok, Terminal windows, IPC sockets."""
+    """Full cleanup of ALL Streamix processes: backend, party server, ngrok, Terminal windows, IPC sockets."""
     global backend_process
     if backend_process:
         try:
             if backend_process.poll() is None:
-                console.print("[dim]Stopping Anilix backend[/dim]")
+                console.print(f"[dim]Stopping {PROJECT_NAME} backend[/dim]")
                 backend_process.terminate()
                 backend_process.wait(timeout=3)
         except:
@@ -124,7 +145,7 @@ def stop_backend():
                 pass
     active_subprocesses.clear()
             
-    # Kill anilix_party Python processes and ngrok
+    # Kill party Python processes and ngrok
     try:
         import signal
         if IS_WINDOWS:
@@ -134,9 +155,9 @@ def stop_backend():
         else:
             # Unix-like cleanup
             # pkill returns non-zero if no process found, so ignore errors
-            subprocess.run(["pkill", "-f", "anilix_party_admin.py"], stderr=subprocess.DEVNULL)
-            subprocess.run(["pkill", "-f", "anilix_party_client.py"], stderr=subprocess.DEVNULL)
-            subprocess.run(["pkill", "-f", "anilix_party.py"], stderr=subprocess.DEVNULL)
+            subprocess.run(["pkill", "-f", "host.py"], stderr=subprocess.DEVNULL)
+            subprocess.run(["pkill", "-f", "client.py"], stderr=subprocess.DEVNULL)
+            subprocess.run(["pkill", "-f", "party.py"], stderr=subprocess.DEVNULL)
             subprocess.run(["pkill", "-9", "ngrok"], stderr=subprocess.DEVNULL)
     except Exception:
         pass
@@ -167,7 +188,7 @@ def stop_backend():
     
     # Cleanup party info file
     try:
-        party_info = os.path.join(os.path.dirname(__file__), ".json", "party_info.json")
+        party_info = os.path.join(os.path.dirname(__file__), "data", "party_info.json")
         if os.path.exists(party_info):
             os.remove(party_info)
     except Exception:
@@ -177,7 +198,7 @@ def stop_backend():
     if not IS_WINDOWS:
         try:
             import glob
-            for sock in glob.glob("/tmp/anilix_*.sock"):
+            for sock in glob.glob("/tmp/streamix_*.sock"):
                 try: os.remove(sock)
                 except: pass
         except Exception:
@@ -190,9 +211,9 @@ def _cleanup_party():
         if IS_WINDOWS:
             os.system("taskkill /F /IM ngrok.exe /T >nul 2>&1")
         else:
-            os.system("pkill -f anilix_party_admin.py >/dev/null 2>&1")
-            os.system("pkill -f anilix_party_client.py >/dev/null 2>&1")
-            os.system("pkill -f anilix_party.py >/dev/null 2>&1")
+            os.system("pkill -f host.py >/dev/null 2>&1")
+            os.system("pkill -f client.py >/dev/null 2>&1")
+            os.system("pkill -f party.py >/dev/null 2>&1")
             os.system("pkill -9 ngrok >/dev/null 2>&1")
     except Exception:
         pass
@@ -222,7 +243,7 @@ def _cleanup_party():
     
     # Remove party_info.json so the next host doesn't read stale data
     try:
-        party_info = os.path.join(os.path.dirname(__file__), ".json", "party_info.json")
+        party_info = os.path.join(os.path.dirname(__file__), "data", "party_info.json")
         if os.path.exists(party_info):
             os.remove(party_info)
     except Exception:
@@ -232,7 +253,7 @@ def _cleanup_party():
     if not IS_WINDOWS:
         try:
             import glob
-            for sock in glob.glob("/tmp/anilix_*.sock"):
+            for sock in glob.glob("/tmp/streamix_*.sock"):
                 try: os.remove(sock)
                 except: pass
         except Exception:
@@ -242,7 +263,7 @@ def _cleanup_party():
     global active_subprocesses
     active_subprocesses = [p for p in active_subprocesses if p.poll() is None]
 
-def _open_in_new_terminal(script_name, args, title="Anilix"):
+def _open_in_new_terminal(script_name, args, title="Streamix"):
     """Open a Python script in a new terminal window. Works on macOS, Windows, and Linux."""
     py = sys.executable
     script = os.path.abspath(script_name)
@@ -289,50 +310,63 @@ def start_backend():
     # Check if a server is already running on 8000
     try:
         requests.get(API_BASE, timeout=1)
-        # console.print("[dim]Backend already running.[/dim]")
         return
     except requests.RequestException:
         pass
 
-    console.print(Align.center(Panel.fit(f"[bold cyan]✨ ANILIX v{VERSION} ✨[/bold cyan]", border_style="cyan", box=box.ROUNDED)))
-    console.print(Align.center("[bold yellow]🚀 Initializing backend server[/bold yellow]"))
-    server_path = os.path.join(os.path.dirname(__file__), "anilix_server.py")
+    # ── Display Header ──
+    console.clear()
+    console.print()  # Spacer
     
-    # Start the server using uvicorn
-    # Ensure .logs directory exists
-    log_dir = os.path.join(os.path.dirname(__file__), ".logs")
-    os.makedirs(log_dir, exist_ok=True)
-    
-    # Redirect stderr to a log file for easier debugging
-    log_file_path = os.path.join(log_dir, "anilix_backend.log")
-    log_file = open(log_file_path, "a")
-    log_file.write(f"\n--- SESSION START: {time.ctime()} ---\n")
-    log_file.flush()
+    banner_path = os.path.join(os.path.dirname(__file__), "banner.txt")
+    if os.path.exists(banner_path):
+        try:
+            with open(banner_path, "r", encoding="utf-8") as f:
+                banner_text = f.read()
+                console.print(Align.center(Text(banner_text, style="bold cyan")))
+        except Exception:
+            console.print(Align.center(f"[bold cyan]✨ {PROJECT_NAME} ✨[/bold cyan]"))
+    else:
+        console.print(Align.center(f"[bold cyan]✨ {PROJECT_NAME} ✨[/bold cyan]"))
 
-    try:
-        backend_process = subprocess.Popen(
-            [sys.executable, "-m", "uvicorn", "anilix_server:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "info"],
-            stdout=log_file,
-            stderr=log_file
-        )
-        atexit.register(stop_backend)
+    console.print(Align.center(f"[bold magenta]v{VERSION}[/bold magenta] [dim]|[/dim] [dim]Made with 💖 by [bold cyan]Vibhas Dutta[/bold cyan][/dim]"))
+    console.print(Align.center(Rule(style="dim cyan"), width=60))
+    console.print()
+
+    # ── Start Backend ──
+    with status_after(f"[bold yellow]🚀 Initializing {PROJECT_NAME} backend server[/bold yellow]", center=True):
+        # Ensure .logs directory exists
+        log_dir = os.path.join(os.path.dirname(__file__), "data", "logs")
+        os.makedirs(log_dir, exist_ok=True)
         
-        # Wait for backend to be ready
-        max_attempts = 15
-        for i in range(max_attempts):
-            try:
-                # Use a specific endpoint to verify health
-                requests.get(f"{API_BASE}/", timeout=1)
-                # console.print("[green]Backend is ready![/green]")
-                return
-            except requests.RequestException:
-                time.sleep(1)
-                
-        console.print("[red]❌ Timed out waiting for Anilix backend to start.[/red]")
-        sys.exit(1)
-    except Exception as e:
-        console.print(f"[red]❌ Failed to start backend: {e}[/red]")
-        sys.exit(1)
+        # Redirect stderr to a log file
+        log_file_path = os.path.join(log_dir, "streamix_backend.log")
+        log_file = open(log_file_path, "a")
+        log_file.write(f"\n--- SESSION START: {time.ctime()} ---\n")
+        log_file.flush()
+
+        try:
+            backend_process = subprocess.Popen(
+                [sys.executable, "-m", "uvicorn", "backend:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "info"],
+                stdout=log_file,
+                stderr=log_file
+            )
+            atexit.register(stop_backend)
+            
+            # Wait for backend to be ready
+            max_attempts = 15
+            for i in range(max_attempts):
+                try:
+                    requests.get(f"{API_BASE}/", timeout=1)
+                    return
+                except requests.RequestException:
+                    time.sleep(1)
+            
+            console.print(f"\n[bold red]❌ Timed out waiting for {PROJECT_NAME} backend to start.[/bold red]")
+            sys.exit(1)
+        except Exception as e:
+            console.print(f"\n[bold red]❌ Failed to start backend: {e}[/bold red]")
+            sys.exit(1)
 
 
 def score_bar(score, max_score=100, width=20):
@@ -375,16 +409,16 @@ def get_mpv_path():
             return path
     return None
 
-def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=False, is_live=False, quality=None, ipc_server=None):
+def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=False, is_live=False, quality=None, ipc_server=None, start_time=0):
     """Platform-aware video playback using mpv exclusively.
     """
     mpv_path = get_mpv_path()
 
     # ── Log Playback ──
     try:
-        log_dir = os.path.join(os.path.dirname(__file__), ".logs")
+        log_dir = os.path.join(os.path.dirname(__file__), "data", "logs")
         os.makedirs(log_dir, exist_ok=True)
-        with open(os.path.join(log_dir, "anilix_backend.log"), "a", encoding='utf-8') as f:
+        with open(os.path.join(log_dir, "streamix_backend.log"), "a", encoding='utf-8') as f:
             ep_string = f" - Ep {episode_num}" if episode_num else ""
             f.write(f"PLAYBACK: [{time.ctime()}] {anime_title}{ep_string} | {url}\n")
     except:
@@ -398,7 +432,7 @@ def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=Fal
         if episode_num:
             title_arg += f" - Ep {episode_num}"
             
-        args = [mpv_path, title_arg]
+        args = [mpv_path, title_arg, "--fs"]
         
         if ipc_server:
             args.append(f"--input-ipc-server={ipc_server}")
@@ -426,16 +460,20 @@ def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=Fal
                 "--cache=yes",
             ])
             
+        if start_time and float(start_time) > 0:
+            args.append(f"--start={start_time}")
+            
+        # ── Native Stdout Tracking (No Lua/Files needed) ──
+        # Force mpv to continuously stream precise playback position to stdout
+        args.append("--term-status-msg=STREAMIX_POS=${=time-pos}|${=duration}")
+
         args.append(url)
         
         try:
             if ipc_server and party_proc:
-                # Party mode: need to monitor party_proc death to auto-kill MPV
-                import threading
                 mpv_process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                
+                import threading
                 def _party_watchdog():
-                    """Kill MPV if the party server dies while video is playing."""
                     while mpv_process.poll() is None:
                         if party_proc.poll() is not None:
                             try: mpv_process.kill()
@@ -445,22 +483,41 @@ def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=Fal
                 
                 watcher = threading.Thread(target=_party_watchdog, daemon=True)
                 watcher.start()
-                mpv_process.wait()  # Block until MPV actually exits
+                mpv_process.wait()
+                return 0.0, 0.0  # Party mode doesn't store local resume progress natively yet
             else:
-                # Solo mode: simple blocking call — most reliable
-                subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                # Solo mode: Capture stdout to precisely track the exit position
+                mpv_process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding="utf-8")
+                
+                last_pos = 0.0
+                duration = 0.0
+                for line in mpv_process.stdout:
+                    if "STREAMIX_POS=" in line:
+                        try:
+                            # Parse out the float values. Format: STREAMIX_POS=pos|dur
+                            val = line.split("STREAMIX_POS=")[1].strip()
+                            parts = val.split("|")
+                            if parts[0] and parts[0] != '(unavailable)':
+                                last_pos = float(parts[0])
+                            if len(parts) > 1 and parts[1] and parts[1] != '(unavailable)':
+                                duration = float(parts[1])
+                        except:
+                            pass
+                            
+                mpv_process.wait()
+                
+            return last_pos, duration
             
-            return True
         except KeyboardInterrupt:
-            return True
+            return 0.0, 0.0
         except Exception as e:
             console.print(f"[bold red]❌ mpv failed to launch:[/bold red] {e}")
-            return False
+            return 0.0, 0.0
     else:
         # MPV Missing - MANDATORY REQUIREMENT
         console.print("\n" + "="*50)
         console.print("[bold red]❌ ERROR: mpv Player Not Found![/bold red]")
-        console.print("[white]Anilix now requires [bold cyan]mpv[/bold cyan] for all playback and tracking.[/white]")
+        console.print(f"[white]{PROJECT_NAME} now requires [bold cyan]mpv[/bold cyan] for all playback and tracking.[/white]")
         
         if current_os == "Windows":
             console.print("[white]👉 Install: [cyan]https://mpv.io/installation/[/cyan] or [magenta]'choco install mpv'[/magenta][/white]")
@@ -487,7 +544,7 @@ def load_cache():
             return {}
     return {}
 
-def save_cache(title, anilist_id, provider, category, episode, total_eps=0, status="Watching", mark_watched=False):
+def save_cache(title, anilist_id, provider, category, episode, total_eps=0, status="Watching", mark_watched=False, resume_time=0):
     cache = load_cache()
     a_id = str(anilist_id)
     if a_id not in cache:
@@ -496,7 +553,8 @@ def save_cache(title, anilist_id, provider, category, episode, total_eps=0, stat
             "anilist_id": anilist_id,
             "watched": [],
             "status": "Watching",
-            "total_eps": total_eps
+            "total_eps": total_eps,
+            "resume_times": {}
         }
     
     entry = cache[a_id]
@@ -515,6 +573,9 @@ def save_cache(title, anilist_id, provider, category, episode, total_eps=0, stat
     if mark_watched and str(episode) not in entry["watched"]:
         entry["watched"].append(str(episode))
         
+    if "resume_times" not in entry: entry["resume_times"] = {}
+    entry["resume_times"][str(episode)] = resume_time
+        
     try:
         with open(CACHE_FILE, "w") as f:
             json.dump(cache, f, indent=4)
@@ -532,20 +593,25 @@ def show_anime_grid(results):
 
     while True:
         console.clear()
-        console.print(Align.center(Panel.fit(f"[bold cyan]✨ ANILIX ✨[/bold cyan] | Page {page+1}/{total_pages}", border_style="cyan", box=box.ROUNDED)))
+        console.print()
+        console.rule(f"[bold cyan]✨ {PROJECT_NAME} ✨[/bold cyan]  [dim]Page {page+1}/{total_pages}[/dim]", style="cyan")
+        console.print()
         
         start = page * page_size
         end = start + page_size
         chunk = results[start:end]
 
         choices = []
-        for res in chunk:
+        for idx, res in enumerate(chunk, 1):
             title_dict = res.get("title", {})
             title_str = title_dict.get("english") or title_dict.get("romaji") or "Unknown"
-            year = str(res.get("seasonYear") or "?")
-            status = res.get("status", "Unknown")
+            year = str(res.get("seasonYear") or "—")
+            status_raw = str(res.get("status", "Unknown")).title().replace("_", " ")
+            avg_score = res.get("averageScore")
+            score_str = f"{avg_score/10:.1f}★" if avg_score else "—"
+
             choices.append(questionary.Choice(
-                title=f"{title_str} ({year}) | {status}",
+                title=f"  {_trunc(title_str, 40):<42} | {year:>4} | {status_raw:<12} | {score_str}",
                 value=res
             ))
         
@@ -554,16 +620,17 @@ def show_anime_grid(results):
         # Navigation controls
         if total_pages > 1:
             if page < total_pages - 1:
-                choices.append(questionary.Choice("➡️ Next Page", value="next"))
+                choices.append(questionary.Choice("  ➡️  Next Page", value="next"))
             if page > 0:
-                choices.append(questionary.Choice("⬅️ Previous Page", value="prev"))
+                choices.append(questionary.Choice("  ⬅️  Previous Page", value="prev"))
         
-        choices.append(questionary.Choice("🔙 Go Back", value="back"))
+        choices.append(questionary.Choice("  🔙  Go Back", value="back"))
 
         selected = questionary.select(
             "Select an anime:",
             choices=choices,
-            instruction="(Use arrows to navigate, Enter to select)"
+            style=QSTYLE,
+            instruction="(↑/↓ navigate, Enter select)"
         ).ask()
         
         if selected is None:
@@ -580,36 +647,40 @@ def show_anime_grid(results):
 
 def display_anime_details(selected_anime):
     console.clear()
+    console.print()
     
     anilist_id = selected_anime.get("id")
     # Fetch full info (with caching)
-    with status_after("[yellow]📖 Loading details[/yellow]"):
+    with status_after(f"[yellow]📖 Loading details for [bold]{selected_anime.get('title', {}).get('english', 'Anime')}[/bold][/yellow]"):
         try:
             full_info = fetch_json(f"{API_BASE}/info/{anilist_id}")
             if full_info:
                 selected_anime = full_info
         except:
-            pass # Use partial info from search results if details fetch fails
+            pass # Use partial info
 
     title_dict = selected_anime.get("title", {})
     t_str = title_dict.get("english") or title_dict.get("romaji") or "Unknown"
     t_romaji = title_dict.get("romaji", "")
     t_native = title_dict.get("native", "")
     
-    console.clear()
-    
-    # ── Big Title ──
-    console.print()
-    console.print(Align.center(Panel.fit(f"[bold cyan]{t_str}[/bold cyan]", border_style="blue", box=box.ROUNDED)))
+    # ── Header ──
+    console.print(Rule(style="dim cyan"))
+    header = Text(justify="center")
+    header.append(f"  {t_str}  \n", style="bold cyan")
+    subtitles = []
     if t_romaji and t_romaji != t_str:
-        console.print(Align.center(f"[dim italic]{t_romaji}[/dim italic]"))
+        subtitles.append(t_romaji)
     if t_native:
-        console.print(Align.center(f"[dim]{t_native}[/dim]"))
+        subtitles.append(t_native)
+    if subtitles:
+        header.append("  •  ".join(subtitles), style="dim italic")
+    console.print(Align.center(header))
+    console.print(Rule(style="dim cyan"))
     console.print()
-    
 
-    # ── Quick Stats Grid ──
-    status = selected_anime.get("status", "Unknown")
+    # ── Info Table ──
+    status = str(selected_anime.get("status", "Unknown")).title().replace("_", " ")
     episodes = selected_anime.get("episodes", "?")
     season = selected_anime.get("season", "")
     year = selected_anime.get("seasonYear", "?")
@@ -618,81 +689,145 @@ def display_anime_details(selected_anime):
     popularity = selected_anime.get("popularity", "?")
     favourites = selected_anime.get("favourites", "?")
     genres = selected_anime.get("genres", [])
+    studios = [s.get("name") for s in selected_anime.get("studios", {}).get("nodes", []) if s.get("isAnimationStudio")]
     
-    studios_data = selected_anime.get("studios", {}).get("nodes", [])
-    studio_names = [s.get("name", "") for s in studios_data if s.get("isAnimationStudio")]
+    # Status color
+    status_colors = {"Releasing": "green", "Finished": "white", "Not Yet Released": "yellow", "Cancelled": "red", "Hiatus": "yellow"}
+    s_color = status_colors.get(status, "white")
     
-    # Title Case Status (e.g. "Releasing" instead of "RELEASING")
-    status_fmt = str(status).title().replace("_", " ") if status else "Unknown"
-    score_fmt = f"{avg_score/10.0:.1f} / 10" if avg_score else "N/A"
-    
-    # Format side-by-side strings
-    left_stats = f"""[bold yellow]📺 Status:[/bold yellow] {status_fmt}
-    [bold green]🎬 Episodes:[/bold green] {episodes}
-    [bold blue]📅 Season:[/bold blue] {season} {year}
-    [bold cyan]🎥 Format:[/bold cyan] {fmt}"""
+    # Score display
+    if avg_score:
+        score_val = avg_score / 10.0
+        stars = "★" * int(score_val) + "☆" * (10 - int(score_val))
+        score_fmt = f"[bold yellow]{score_val:.1f}[/bold yellow] [dim]{stars}[/dim]"
+    else:
+        score_fmt = "[dim]N/A[/dim]"
 
-    right_stats = f"""[bold magenta]⭐ Score:[/bold magenta] {score_fmt}
-    [bold red]❤️ Favourites:[/bold red] {favourites}
-    [bold bright_cyan]📈 Popularity:[/bold bright_cyan] {popularity}
-    [bold magenta]🏢 Studio:[/bold magenta] {', '.join(studio_names) if studio_names else 'N/A'}"""
+    info_grid = Table.grid(expand=True, padding=(0, 2))
+    info_grid.add_column("L", ratio=1)
+    info_grid.add_column("R", ratio=1)
 
-    # Grid for stats
-    stats_grid = Table.grid(expand=False, padding=(0, 6))
-    stats_grid.add_row(left_stats, right_stats)
-    
-    details_panel = Panel(
-        stats_grid, 
-        title="[bold white]Anime Information[/bold white]", 
-        border_style="cyan",
-        box=box.ROUNDED,
-        padding=(1, 4)
+    info_grid.add_row(
+        f"[bold cyan]Status:[/bold cyan] [{s_color}]{status}[/{s_color}]",
+        f"[bold magenta]Score:[/bold magenta] {score_fmt}"
     )
-    console.print(Align.center(details_panel))
-
+    info_grid.add_row(
+        f"[bold cyan]Episodes:[/bold cyan] {episodes}",
+        f"[bold magenta]Popularity:[/bold magenta] {popularity}"
+    )
+    info_grid.add_row(f"[bold cyan]Season:[/bold cyan] {season} {year}", f"[bold magenta]Favorites:[/bold magenta] {favourites}")
+    site_url = selected_anime.get("siteUrl", f"https://anilist.co/anime/{anilist_id}")
+    
+    info_grid.add_row(
+        f"[bold cyan]Format:[/bold cyan] {fmt}",
+        f"[bold magenta]Studio:[/bold magenta] {', '.join(studios) if studios else 'N/A'}"
+    )
+    info_grid.add_row(f"[bold cyan]Link:[/bold cyan] [dim blue underline]{site_url}[/dim blue underline]", "")
+    
+    console.print(info_grid)
+    console.print()
+    
     # ── Genres ──
     if genres:
-        genre_tags = " ".join([f"[bold black on bright_cyan] {g} [/bold black on bright_cyan]" for g in genres])
+        genre_text = Text()
+        for i, g in enumerate(genres):
+            genre_text.append(f" {g} ", style="bold black on cyan")
+            if i < len(genres) - 1: genre_text.append("  ")
+        console.print(Align.center(genre_text))
         console.print()
-        console.print(Align.center(genre_tags))
-    
+
     # ── Synopsis ──
-    description = selected_anime.get("description", "")
-    if description:
-        import re
-        clean_desc = re.sub(r'<[^>]+>', '', description).strip()
-        synopsis_panel = Panel(
-            clean_desc,
-            title="[bold white]Synopsis[/bold white]",
-            border_style="dim",
-            box=box.ROUNDED,
-            width=min(90, console.width - 4),
-            padding=(1, 2)
-        )
-        console.print()
-        console.print(Align.center(synopsis_panel))
+    description = selected_anime.get("description", "No description available.")
+    import re
+    clean_desc = re.sub(r'<[^>]+>', '', description).strip()
     
-    # ── Next Airing ──
+    if clean_desc and clean_desc != "No description available.":
+        console.print(Rule("[bold white]SYNOPSIS[/bold white]", style="dim"))
+        console.print()
+        # Limit to ~4 lines for readability
+        lines = clean_desc.split(". ")
+        short_desc = ". ".join(lines[:4])
+        if len(lines) > 4:
+            short_desc += "…"
+        console.print(f"  [dim]{short_desc}[/dim]")
+        console.print()
+
+    # ── Airing Status ──
     next_ep = selected_anime.get("nextAiringEpisode")
     if next_ep:
-        ep_num = next_ep.get("episode", "?")
+        ep_num = next_ep.get("episode")
         time_left = next_ep.get("timeUntilAiring", 0)
         days = time_left // 86400
         hours = (time_left % 86400) // 3600
+        console.print(Align.center(f"[bold yellow]⏰ Episode {ep_num} airs in {days}d {hours}h[/bold yellow]"))
         console.print()
-        console.print(Align.center(Panel.fit(f"[bold yellow]⏰ Next Episode: {ep_num} airing in {days}d {hours}h[/bold yellow]", border_style="yellow")))
-    
+
+    console.print(Rule(style="dim cyan"))
     console.print()
-    return t_str, anilist_id
+
+    # ── Action Menu ──
+    relations_list = selected_anime.get("relations", {}).get("edges", [])
+    anime_relations = []
+    seen_ids = set()
+    valid_relations = {"PREQUEL", "SEQUEL", "PARENT", "SIDE_STORY", "SPIN_OFF", "ALTERNATIVE", "ADAPTATION", "FRANCHISE"}
+    
+    def _add_relation(rel_node, rel_str):
+        n_id = rel_node.get("id")
+        if not n_id or n_id in seen_ids:
+            return
+        if rel_node.get("type") == "ANIME":
+            anime_relations.append({"relationType": rel_str, "node": rel_node})
+            seen_ids.add(n_id)
+
+    # First pass
+    for rel in (relations_list or []):
+        node = rel.get("node", {})
+        rel_type = rel.get("relationType", "")
+        if rel_type in valid_relations:
+            _add_relation(node, rel_type)
+            
+            # Second pass (franchise expansion)
+            deep_edges = node.get("relations", {}).get("edges", [])
+            for deep_rel in deep_edges:
+                if deep_rel.get("relationType", "") in valid_relations:
+                    _add_relation(deep_rel.get("node", {}), "FRANCHISE")
+
+    opt_choices = [
+        questionary.Choice("  ▶️  Watch Episodes", value="watch")
+    ]
+    
+    if anime_relations:
+        opt_choices.append(questionary.Separator("--- Related / Seasons ---"))
+        for r in anime_relations[:20]:
+            rel_type = str(r.get("relationType", "RELATED")).replace("_", " ").title()
+            node = r.get("node", {})
+            r_title = node.get("title", {}).get("english") or node.get("title", {}).get("romaji") or "Unknown"
+            opt_choices.append(questionary.Choice(f"  🔗  {rel_type}: {_trunc(r_title, 40)}", value=("relation", node)))
+            
+    opt_choices.append(questionary.Separator())
+    opt_choices.append(questionary.Choice("  🔙  Back", value="back"))
+    
+    action_val = questionary.select(
+        "What would you like to do?",
+        choices=opt_choices,
+        style=QSTYLE
+    ).ask()
+    
+    if action_val == "watch":
+        return "watch", (t_str, anilist_id)
+    elif isinstance(action_val, tuple) and action_val[0] == "relation":
+        return "relation", action_val[1]
+    
+    return "back", None
 
 def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None, ipc_server_path=None):
     with status_after(f"[yellow]🔍 Fetching providers for {t_str}[/yellow]"):
         try:
-            # Metadata stays for 24h
-            providers = fetch_json(f"{API_BASE}/episodes/{anilist_id}", ttl_hours=24)
+            # Episodes should have low TTL (1h) so airing anime get new episodes quickly
+            providers = fetch_json(f"{API_BASE}/episodes/{anilist_id}", ttl_hours=1)
         except Exception as e:
             console.print(f"[red]❌ Connection Error: {e}[/red]")
-            console.print("[dim]Check '.logs/anilix_backend.log' for details.[/dim]")
+            console.print("[dim]Check 'data/logs/streamix_backend.log' for details.[/dim]")
             return
 
     providers = providers.get("providers", {})
@@ -709,17 +844,20 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None,
         auto_text = "ON" if auto_play else "OFF"
         if not session_provider:
             console.clear()
-            console.print(Align.center(Panel.fit(f"[bold magenta]{t_str}[/bold magenta]", border_style="magenta", box=box.ROUNDED)))
+            console.print()
+            console.rule(f"[bold magenta]{t_str}[/bold magenta]", style="magenta")
+            console.print()
             
             p_names = list(providers.keys())
-            p_choices = [questionary.Choice(name.upper(), value=name) for name in p_names]
+            p_choices = [questionary.Choice(f"  📡  {name.upper()}", value=name) for name in p_names]
             p_choices.append(questionary.Separator())
-            p_choices.append(questionary.Choice("🔙 Back to Main Menu", value="back"))
+            p_choices.append(questionary.Choice("  🔙  Back to Main Menu", value="back"))
             
             session_provider = questionary.select(
                 "Select Provider:",
                 choices=p_choices,
-                instruction="(Arrows to navigate)"
+                style=QSTYLE,
+                instruction="(↑/↓ navigate)"
             ).ask()
             
             if session_provider is None:
@@ -730,18 +868,21 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None,
 
         if not session_category:
             console.clear()
-            header = f"[bold magenta]{t_str}[/bold magenta] | Provider: [bold cyan]{session_provider.upper()}[/bold cyan] | Auto-Play: {auto_label}"
-            console.print(Align.center(Panel.fit(header, border_style="magenta", box=box.ROUNDED)))
+            console.print()
+            header = f"[bold magenta]{t_str}[/bold magenta]  [dim]|[/dim]  [bold cyan]{session_provider.upper()}[/bold cyan]  [dim]|[/dim]  Auto-Play: {auto_label}"
+            console.rule(header, style="magenta")
+            console.print()
             
             categories = list(providers[session_provider].get("episodes", {}).keys())
-            cat_choices = [questionary.Choice(f"🔄 Toggle Auto-Play ({auto_text})", value="toggle_auto")]
-            cat_choices.extend([questionary.Choice(c.upper(), value=c) for c in categories])
+            cat_choices = [questionary.Choice(f"  🔄  Toggle Auto-Play ({auto_text})", value="toggle_auto")]
+            cat_choices.extend([questionary.Choice(f"  🎬  {c.upper()}", value=c) for c in categories])
             cat_choices.append(questionary.Separator())
-            cat_choices.append(questionary.Choice("🔙 Change Provider", value="back"))
+            cat_choices.append(questionary.Choice("  🔙  Change Provider", value="back"))
             
             session_category = questionary.select(
                 "Select Category:",
-                choices=cat_choices
+                choices=cat_choices,
+                style=QSTYLE,
             ).ask()
             
             if session_category is None:
@@ -774,25 +915,48 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None,
         watched_map = set(cache.get(str(anilist_id), {}).get("watched", []))
         last_watched = cache.get(str(anilist_id), {}).get("last_watched_ep")
 
-        # Select Episode with Questionary
+        resume_times = cache.get(str(anilist_id), {}).get("resume_times", {})
+
+        # ── Episode List ──
+        console.clear()
+        console.print()
+        watched_count = len(watched_map)
+        progress_str = f"{watched_count}/{len(ep_list)}" if len(ep_list) > 0 else ""
+        console.rule(f"[bold magenta]{_trunc(t_str, 30)}[/bold magenta]  [dim]|[/dim]  [bold cyan]{session_provider.upper()}[/bold cyan]  [dim]|[/dim]  [dim]{progress_str} episodes[/dim]", style="magenta")
+        console.print()
+
         ep_choices = []
         for ep in ep_list:
             e_num = str(ep.get('number'))
-            prefix = "✅ " if e_num in watched_map else "   "
+            ep_title = _trunc(ep.get('title', ''), 40)
+            
             if e_num == last_watched:
-                prefix = "▶️ " # Indicator for current/last watching
+                status_icon = "▶️ Now"
+                prefix = "▶️"
+            elif e_num in watched_map:
+                status_icon = "✅ Done"
+                prefix = "✅"
+            elif e_num in resume_times and float(resume_times[e_num]) > 0:
+                saved_pos = int(resume_times[e_num])
+                status_icon = f"⏳ Resume ({saved_pos//60}:{saved_pos%60:02d})"
+                prefix = "⏳"
+            else:
+                status_icon = "—"
+                prefix = "  "
             
             ep_choices.append(questionary.Choice(
-                title=f"{prefix}Episode {e_num} {ep.get('title', '')}", 
+                title=f" {prefix} Ep {e_num:<4} | {_trunc(ep_title, 40):<42} | {status_icon}", 
                 value=ep
             ))
-            
+        
         ep_choices.append(questionary.Separator())
-        ep_choices.append(questionary.Choice("🔙 Back to Categories", value="back"))
+        ep_choices.append(questionary.Choice("  🔙  Back to Categories", value="back"))
         
         selected_ep = questionary.select(
-            f"Select Episode for {t_str}:",
-            choices=ep_choices
+            f"Select Episode:",
+            choices=ep_choices,
+            style=QSTYLE,
+            instruction="(↑/↓ navigate)"
         ).ask()
         
         if selected_ep is None:
@@ -819,19 +983,21 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None,
             continue
             
         # Select Video Link with Questionary
+        quality_icons = {"1080p": "💎", "720p": "🎬", "480p": "📺", "360p": "📟"}
         stream_choices = [
             questionary.Choice(
-                title=f"🚀 Play: {str(s.get('quality', 'Unknown')).upper()} | {s.get('url', '')}", 
+                title=f"  {quality_icons.get(str(s.get('quality', '')).lower(), '🚀')}  {str(s.get('quality', 'Auto')).upper():<7} | {s.get('url', '')}", 
                 value=s
             )
             for s in streams
         ]
         stream_choices.append(questionary.Separator())
-        stream_choices.append(questionary.Choice("🔙 Back to Episodes", value="back"))
+        stream_choices.append(questionary.Choice("  🔙  Back to Episodes", value="back"))
         
         selected_stream = questionary.select(
             f"Select Quality (Ep {ep_num}):",
-            choices=stream_choices
+            choices=stream_choices,
+            style=QSTYLE,
         ).ask()
         
         if selected_stream is None:
@@ -843,18 +1009,43 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None,
         while True:
             selected_url = selected_stream.get("url")
             if selected_url:
-                # 1. Instant update to mark as 'Currently Watching' (▶️ indicator)
-                # We set mark_watched=False so the checkbox doesn't appear until it's actually finished
-                save_cache(t_str, anilist_id, session_provider, session_category, ep_num, total_eps=len(ep_list), status="Watching", mark_watched=False)
+                cache = load_cache()
+                resume_time = cache.get(str(anilist_id), {}).get("resume_times", {}).get(str(ep_num), 0)
                 
-                play_video(selected_url, t_str, ep_num, ipc_server=ipc_server_path)
+                # 1. Instant update to mark as 'Currently Watching' (▶️ indicator)
+                # We save with the current resume_time
+                save_cache(t_str, anilist_id, session_provider, session_category, ep_num, total_eps=len(ep_list), status="Watching", mark_watched=False, resume_time=resume_time)
+                
+                final_time, dur = play_video(selected_url, t_str, ep_num, ipc_server=ipc_server_path, start_time=resume_time)
                 
                 # Check if this was the last episode
                 current_idx = next((i for i, e in enumerate(ep_list) if str(e.get('number')) == ep_num), -1)
                 is_last = (current_idx != -1 and current_idx + 1 == len(ep_list))
 
-                # 2. Final update to mark as 'Completed' (✅ checkbox)
-                save_cache(t_str, anilist_id, session_provider, session_category, ep_num, total_eps=len(ep_list), status="Completed" if is_last else "Watching", mark_watched=True)
+                # 2. Final update based on duration threshold
+                if dur > 0:
+                    if (final_time / dur) > 0.90:
+                        completed_ep = True
+                        saved_resume = 0
+                    else:
+                        completed_ep = False
+                        saved_resume = final_time
+                else:
+                    if final_time > 5.0:
+                        # Duration unknown but watched somewhat
+                        completed_ep = False
+                        saved_resume = final_time
+                    else:
+                        # Failed to load entirely or instant quit -> abort without marking completed
+                        completed_ep = False
+                        saved_resume = resume_time
+                    
+                if is_last and completed_ep:
+                    ep_status = "Completed"
+                else:
+                    ep_status = "Watching"
+                    
+                save_cache(t_str, anilist_id, session_provider, session_category, ep_num, total_eps=len(ep_list), status=ep_status, mark_watched=completed_ep, resume_time=saved_resume)
             
                 # --- Auto Next Logic ---
                 if not is_last:
@@ -945,7 +1136,7 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None,
                         save_cache(t_str, anilist_id, session_provider, session_category, next_num, total_eps=len(ep_list), status="Watching", mark_watched=False)
                         
                         console.print(f"\n[bold green]✅ Episode Finished![/bold green]")
-                        should_play = questionary.confirm(f"Play Episode {next_num} next?", default=True).ask()
+                        should_play = questionary.confirm(f"Play Episode {next_num} next?", default=True, style=QSTYLE).ask()
                         
                     if should_play:
                         ep_num = next_num
@@ -972,31 +1163,30 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None,
                 else:
                     # End of series
                     console.print()
-                    console.print(Align.center(Panel.fit("[bold green]🎉 SERIES COMPLETED! 🎉[/bold green]", border_style="green", box=box.ROUNDED)))
+                    console.rule("[bold green]🎉 SERIES COMPLETED! 🎉[/bold green]", style="bold green")
+                    console.print()
                     console.print(Align.center("[dim]You have watched all available episodes of this series.[/dim]"))
                     time.sleep(2.5)
                     break
 
 def main():
     start_backend()
-    console.print(
-        f"[dim]Detected OS: {current_os.value} | raw={RAW_OS_NAME} {RAW_OS_RELEASE} | version={RAW_OS_VERSION}[/dim]"
-    )
+    
     search_history = []
     
     # ── Mode Selection ──
-    console.clear()
-    console.print(Align.center(Panel.fit("[bold magenta]How do you want to watch?[/bold magenta]", border_style="magenta", box=box.ROUNDED)))
+    # console.clear() # Preserving the banner from start_backend
     
     mode = questionary.select(
         "How do you want to watch?",
         choices=[
-            questionary.Choice("🎬 Solo (Watch Alone)", value="solo"),
-            questionary.Choice("🎉 Party (Watch Together)", value="party"),
+            questionary.Choice("  🎬  Solo (Watch Alone)", value="solo"),
+            questionary.Choice("  🎉  Party (Watch Together)", value="party"),
             questionary.Separator(),
-            questionary.Choice("🚪 Exit", value="exit"),
+            questionary.Choice("  🚪  Exit", value="exit"),
         ],
-        instruction="(Select with arrows)"
+        style=QSTYLE,
+        instruction="(↑/↓ navigate)"
     ).ask()
     
     if mode is None or mode == "exit":
@@ -1011,15 +1201,18 @@ def main():
     
     if mode == "party":
         console.clear()
-        console.print(Align.center(Panel.fit("[bold cyan]🎉 WATCH PARTY MODE[/bold cyan]", border_style="cyan", box=box.ROUNDED)))
+        console.rule("[bold cyan]🎉 WATCH PARTY MODE[/bold cyan]", style="dim cyan")
+        console.print()
         
         party_choice = questionary.select(
             "What would you like to do?",
             choices=[
-                questionary.Choice("📡 Host a Party", value="host"),
-                questionary.Choice("🔗 Join a Party", value="join"),
-                questionary.Choice("🔙 Back", value="back"),
-            ]
+                questionary.Choice("  📡  Host a Party", value="host"),
+                questionary.Choice("  🔗  Join a Party", value="join"),
+                questionary.Separator(),
+                questionary.Choice("  🔙  Back", value="back"),
+            ],
+            style=QSTYLE,
         ).ask()
         
         if party_choice is None or party_choice == "back":
@@ -1027,8 +1220,9 @@ def main():
         
         if party_choice == "join":
             console.clear()
-            console.print(Align.center(Panel.fit("[bold cyan]🔗 JOIN WATCH PARTY[/bold cyan]", border_style="cyan", box=box.ROUNDED)))
-            party_url = questionary.text("Enter Party Link (wss://... or ws://...):").ask()
+            console.rule("[bold cyan]🔗 JOIN WATCH PARTY[/bold cyan]", style="dim cyan")
+            console.print()
+            party_url = questionary.text("Enter Party Link (wss://... or ws://...):", style=QSTYLE).ask()
             if not party_url:
                 return
             # Normalize URL: accept any format the user pastes
@@ -1040,12 +1234,12 @@ def main():
             elif not party_url.startswith("ws://") and not party_url.startswith("wss://"):
                 party_url = "wss://" + party_url
             
-            username = questionary.text("Enter Your Name:").ask()
+            username = questionary.text("Enter Your Name:", style=QSTYLE).ask()
             if not username:
                 username = f"Guest_{int(time.time())%1000}"
             
             console.print("[yellow]Connecting... a new window will open for chat.[/yellow]")
-            _open_in_new_terminal("anilix_party_client.py", [party_url, username], title="Anilix Client")
+            _open_in_new_terminal("client.py", [party_url, username], title="Streamix Client")
             console.print("[bold green]✅ Client window launched![/bold green]")
             input("Press Enter to return to menu...")
             return main()
@@ -1053,10 +1247,10 @@ def main():
         if party_choice == "host":
             import uuid
             uid = str(uuid.uuid4())[:8]
-            ipc_server_path = fr"\\.\pipe\anilix_host_{uid}" if IS_WINDOWS else f"/tmp/anilix_host_{uid}.sock"
+            ipc_server_path = fr"\\.\pipe\streamix_host_{uid}" if IS_WINDOWS else f"/tmp/streamix_host_{uid}.sock"
             
-            room_name = questionary.text("Room Name:", default=f"{os.getlogin()}'s Party").ask()
-            host_name = questionary.text("Your Host Name:", default="Host").ask()
+            room_name = questionary.text("Room Name:", default=f"{os.getlogin()}'s Party", style=QSTYLE).ask()
+            host_name = questionary.text("Your Host Name:", default="Host", style=QSTYLE).ask()
             
             if not room_name or not host_name:
                 return
@@ -1066,17 +1260,17 @@ def main():
             # Clean up any leftover party processes from a previous session
             _cleanup_party()
             time.sleep(0.5)  # Give port 9000 time to be released
-            party_log_file = open(os.path.join(os.path.dirname(__file__), ".logs", "anilix_backend.log"), "a")
+            party_log_file = open(os.path.join(os.path.dirname(__file__), "data", "logs", "streamix_backend.log"), "a")
             party_log_file.write(f"\n--- WATCH PARTY SERVER START: {time.ctime()} ---\n")
             party_log_file.flush()
             party_proc = subprocess.Popen(
-                [sys.executable, "anilix_party.py", room_name, host_name],
+                [sys.executable, "party.py", room_name, host_name],
                 stdout=party_log_file,
                 stderr=party_log_file
             )
             active_subprocesses.append(party_proc)
             
-            party_info_path = os.path.join(os.path.dirname(__file__), ".json", "party_info.json")
+            party_info_path = os.path.join(os.path.dirname(__file__), "data", "party_info.json")
             for _ in range(20):
                 if os.path.exists(party_info_path):
                     break
@@ -1086,7 +1280,7 @@ def main():
                 with open(party_info_path, "r") as f:
                     info = json.load(f)
                     console.print(f"\n[bold green]✅ Party ready! Share this link with friends:[/bold green]")
-                    console.print(Align.center(Panel.fit(f"[bold yellow]{info['url']}[/bold yellow]", border_style="green", box=box.ROUNDED)))
+                    console.print(Align.center(f"[bold yellow]{info['url']}[/bold yellow]"))
                     
                     # Auto-copy URL to clipboard based on OS natively
                     try:
@@ -1104,7 +1298,7 @@ def main():
                     except BaseException:
                         pass
                 
-                _open_in_new_terminal("anilix_party_admin.py", [host_name, ipc_server_path or ""], title="Anilix Admin")
+                _open_in_new_terminal("host.py", [host_name, ipc_server_path or ""], title="Streamix Host")
                 
                 console.print("[dim]Admin console opened in a new window.[/dim]")
                 party_active = True
@@ -1124,31 +1318,38 @@ def main():
             time.sleep(1)
             return main()
 
-        console.print()
         console.clear()
+        console.print()
         
-        console.print(Align.center(Panel.fit("[bold magenta]✨ ANILIX v1.0.0 ✨[/bold magenta]", border_style="magenta", box=box.ROUNDED)))
+        # ── Dashboard Header ──
+        mode_label = "[green]🎉 Party[/green]" if party_active else "[cyan]🎬 Solo[/cyan]"
+        mpv_ok = "[green]✓[/green]" if get_mpv_path() else "[red]✗[/red]"
+        console.rule(f"[bold cyan]✨ {PROJECT_NAME} ✨[/bold cyan]", style="cyan")
+        console.print(Align.center(f"{mode_label}  [dim]|[/dim]  [dim]v{VERSION}[/dim]  [dim]|[/dim]  mpv {mpv_ok}"))
+        console.print(Rule(style="dim cyan"))
+        console.print()
         
         cache = load_cache()
         
         menu_choices = [
-            questionary.Choice("🔍 Search Anime", value="search"),
-            questionary.Choice("🔥 Discover Trending", value="trending"),
-            questionary.Choice("🏆 Top Popular", value="popular")
+            questionary.Choice("  🔍  Search Anime", value="search"),
+            questionary.Choice("  🔥  Discover Trending", value="trending"),
+            questionary.Choice("  🏆  Top Popular", value="popular")
         ]
         if cache:
-            menu_choices.append(questionary.Choice("📚 View Watch History", value="history"))
+            menu_choices.append(questionary.Choice("  📚  Watch History", value="history"))
             
-        menu_choices.append(questionary.Choice("▶️ Play Custom Video (Local/URL)", value="custom_play"))
+        menu_choices.append(questionary.Choice("  ▶️  Custom Video (Local/URL)", value="custom_play"))
         
         menu_choices.append(questionary.Separator())
-        menu_choices.append(questionary.Choice("🔙 Back", value="back"))
-        menu_choices.append(questionary.Choice("🚪 Exit", value="exit"))
+        menu_choices.append(questionary.Choice("  🔙  Back", value="back"))
+        menu_choices.append(questionary.Choice("  🚪  Exit", value="exit"))
         
         choice = questionary.select(
             "What would you like to do?",
             choices=menu_choices,
-            instruction="(Select with arrows)"
+            style=QSTYLE,
+            instruction="(↑/↓ navigate)"
         ).ask()
         
         if choice is None or choice == "exit":
@@ -1161,17 +1362,20 @@ def main():
             
         elif choice == 'custom_play':
             console.clear()
-            console.print(Align.center(Panel.fit("[bold cyan]▶️ CUSTOM VIDEO PLAYBACK[/bold cyan]", border_style="cyan", box=box.ROUNDED)))
+            console.rule("[bold cyan]▶️ CUSTOM VIDEO PLAYBACK[/bold cyan]", style="dim cyan")
+            console.print()
             console.print("[dim]Supported: Local files, HTTP Links, YouTube URLs (yt-dlp is installed for mpv)[/dim]\n")
             
             sub_choice = questionary.select(
                 "Choose playback source:",
                 choices=[
-                    questionary.Choice("📁 Select Local File", value="local"),
-                    questionary.Choice("🔗 Paste Link", value="link"),
-                    questionary.Choice("📡 Live Stream Link (Low Latency)", value="live"),
-                    questionary.Choice("🔙 Back", value="back")
-                ]
+                    questionary.Choice("  📁  Select Local File", value="local"),
+                    questionary.Choice("  🔗  Paste Link", value="link"),
+                    questionary.Choice("  📡  Live Stream (Low Latency)", value="live"),
+                    questionary.Separator(),
+                    questionary.Choice("  🔙  Back", value="back")
+                ],
+                style=QSTYLE,
             ).ask()
             
             if not sub_choice or sub_choice == "back":
@@ -1207,7 +1411,7 @@ def main():
                     continue
             else:
                 prompt_text = "Enter live stream URL (leave blank to go back):" if is_live_stream else "Enter video URL (leave blank to go back):"
-                custom_path = questionary.text(prompt_text).ask()
+                custom_path = questionary.text(prompt_text, style=QSTYLE).ask()
                 if not custom_path:
                     continue
                 
@@ -1227,12 +1431,13 @@ def main():
                 selected_quality = questionary.select(
                     "Select Max Quality:",
                     choices=[
-                        questionary.Choice("🚀 Best Available", value="best"),
-                        questionary.Choice("💎 1080p", value="1080"),
-                        questionary.Choice("🎬 720p", value="720"),
-                        questionary.Choice("📺 480p", value="480"),
-                        questionary.Choice("📟 360p", value="360"),
-                    ]
+                        questionary.Choice("  🚀  Best Available", value="best"),
+                        questionary.Choice("  💎  1080p", value="1080"),
+                        questionary.Choice("  🎬  720p", value="720"),
+                        questionary.Choice("  📺  480p", value="480"),
+                        questionary.Choice("  📟  360p", value="360"),
+                    ],
+                    style=QSTYLE,
                 ).ask()
                 if selected_quality == "best":
                     selected_quality = None
@@ -1244,23 +1449,23 @@ def main():
             
         elif choice == 'search':
             # Search with History helper
-            search_query_choices = [questionary.Choice(f"Recent: {q}", value=q) for q in search_history[:5]]
+            search_query_choices = [questionary.Choice(f"  🕐  {q}", value=q) for q in search_history[:5]]
             if search_query_choices:
                 search_query_choices.append(questionary.Separator())
-            search_query_choices.append(questionary.Choice("🆕 New Search", value="new"))
+            search_query_choices.append(questionary.Choice("  🆕  New Search", value="new"))
             search_query_choices.append(questionary.Separator())
-            search_query_choices.append(questionary.Choice("🔙 Back", value="back"))
+            search_query_choices.append(questionary.Choice("  🔙  Back", value="back"))
             
             if search_history:
-                query_choice = questionary.select("Search Anime:", choices=search_query_choices).ask()
+                query_choice = questionary.select("Search Anime:", choices=search_query_choices, style=QSTYLE).ask()
                 if query_choice == "back" or query_choice is None:
                     continue
                 if query_choice == "new":
-                    query = questionary.text("Enter anime title (leave blank to go back):").ask()
+                    query = questionary.text("Enter anime title (leave blank to go back):", style=QSTYLE).ask()
                 else:
                     query = query_choice
             else:
-                query = questionary.text("Enter anime title (leave blank to go back):").ask()
+                query = questionary.text("Enter anime title (leave blank to go back):", style=QSTYLE).ask()
                 
             if not query:
                 continue
@@ -1270,12 +1475,12 @@ def main():
                 
             with status_after(f"[yellow]🔍 Searching for '{query}'[/yellow]", center=True):
                 try:
-                    # Search results stay for 1h
-                    data = fetch_json(f"{API_BASE}/search", params={"query": query}, ttl_hours=1)
+                    # Search results stay for 1h, increasing per_page to 50 for thicker result sets
+                    data = fetch_json(f"{API_BASE}/search", params={"query": query, "per_page": 50}, ttl_hours=1)
                     results = data.get("results", [])
                 except Exception as e:
                     console.print(f"[red]❌ Connection Error: {e}[/red]")
-                    console.print("[dim]Check '.logs/anilix_backend.log' for details.[/dim]")
+                    console.print("[dim]Check 'data/logs/streamix_backend.log' for details.[/dim]")
                     continue
             
             if not results:
@@ -1284,9 +1489,16 @@ def main():
                 continue
                 
             selected_anime = show_anime_grid(results)
-            if selected_anime:
-                t_str, anilist_id = display_anime_details(selected_anime)
-                handle_episode_flow(anilist_id, t_str, ipc_server_path=ipc_server_path)
+            while selected_anime:
+                action, payload = display_anime_details(selected_anime)
+                if action == "watch":
+                    t_str, anilist_id = payload
+                    handle_episode_flow(anilist_id, t_str, ipc_server_path=ipc_server_path)
+                    break
+                elif action == "relation":
+                    selected_anime = payload
+                else:
+                    break
                 
         elif choice == 'trending':
             with status_after(f"[yellow]🔥 Fetching Trending Anime[/yellow]", center=True):
@@ -1296,7 +1508,7 @@ def main():
                     results = data.get("results", [])
                 except Exception as e:
                     console.print(f"[red]❌ Connection Error: {e}[/red]")
-                    console.print("[dim]Check '.logs/anilix_backend.log' for details.[/dim]")
+                    console.print("[dim]Check 'data/logs/streamix_backend.log' for details.[/dim]")
                     continue
             
             if not results:
@@ -1305,9 +1517,16 @@ def main():
                 continue
                 
             selected_anime = show_anime_grid(results)
-            if selected_anime:
-                t_str, anilist_id = display_anime_details(selected_anime)
-                handle_episode_flow(anilist_id, t_str, ipc_server_path=ipc_server_path)
+            while selected_anime:
+                action, payload = display_anime_details(selected_anime)
+                if action == "watch":
+                    t_str, anilist_id = payload
+                    handle_episode_flow(anilist_id, t_str, ipc_server_path=ipc_server_path)
+                    break
+                elif action == "relation":
+                    selected_anime = payload
+                else:
+                    break
                 
         elif choice == 'popular':
             with status_after(f"[yellow]🏆 Fetching Popular Anime[/yellow]", center=True):
@@ -1317,7 +1536,7 @@ def main():
                     results = data.get("results", [])
                 except Exception as e:
                     console.print(f"[red]❌ Connection Error: {e}[/red]")
-                    console.print("[dim]Check '.logs/anilix_backend.log' for details.[/dim]")
+                    console.print("[dim]Check 'data/logs/streamix_backend.log' for details.[/dim]")
                     continue
             
             if not results:
@@ -1326,19 +1545,28 @@ def main():
                 continue
                 
             selected_anime = show_anime_grid(results)
-            if selected_anime:
-                t_str, anilist_id = display_anime_details(selected_anime)
-                handle_episode_flow(anilist_id, t_str, ipc_server_path=ipc_server_path)
+            while selected_anime:
+                action, payload = display_anime_details(selected_anime)
+                if action == "watch":
+                    t_str, anilist_id = payload
+                    handle_episode_flow(anilist_id, t_str, ipc_server_path=ipc_server_path)
+                    break
+                elif action == "relation":
+                    selected_anime = payload
+                else:
+                    break
                 
         elif choice == 'history' and cache:
             console.clear()
-            console.print(Align.center(Panel.fit("[bold cyan]📚 WATCH HISTORY[/bold cyan]", border_style="cyan", box=box.ROUNDED)))
+            console.print()
+            console.rule("[bold cyan]📚 WATCH HISTORY[/bold cyan]", style="cyan")
+            console.print()
             
             # Sort by most recent
             sorted_history = sorted(cache.values(), key=lambda x: x.get("timestamp", 0), reverse=True)
             
             h_choices = []
-            for item in sorted_history:
+            for idx, item in enumerate(sorted_history, 1):
                 title = item.get("title", "Unknown")
                 prov = item.get("provider", "?")
                 ep = item.get("last_watched_ep", "?")
@@ -1346,31 +1574,43 @@ def main():
                 watched_count = len(item.get("watched", []))
                 total_eps = item.get("total_eps", 0)
                 
-                progress = f" ({watched_count}/{total_eps})" if total_eps > 0 else ""
-                status_tag = f" [Completed]" if status == "Completed" else f" [{watched_count}/{total_eps}]"
+                if status == "Completed":
+                    progress_str = "✅ Done"
+                elif total_eps > 0:
+                    progress_str = f"{watched_count}/{total_eps}"
+                else:
+                    progress_str = f"Ep {ep}"
                 
                 h_choices.append(questionary.Choice(
-                    f"{title} | {prov.upper()} (Ep {ep}){status_tag}",
+                    f" {idx:>2} | {_trunc(title, 35):<37} | {prov.upper():<10} | Ep {str(ep):<4} | {progress_str}",
                     value=item
                 ))
             
             h_choices.append(questionary.Separator())
-            h_choices.append(questionary.Choice("🔙 Back", value="back"))
+            h_choices.append(questionary.Choice("  🔙  Back", value="back"))
             
-            selected_item = questionary.select("Resume watching:", choices=h_choices).ask()
+            selected_item = questionary.select("Resume watching:", choices=h_choices, style=QSTYLE).ask()
             
-            if selected_item == "back":
+            if selected_item == "back" or selected_item is None:
                 continue
             
             mock_anime = {"id": selected_item["anilist_id"], "title": {"english": selected_item["title"]}}
-            t_str, anilist_id = display_anime_details(mock_anime)
-            handle_episode_flow(
-                anilist_id, 
-                t_str, 
-                pre_provider=selected_item.get("provider"),
-                pre_category=selected_item.get("category"),
-                ipc_server_path=ipc_server_path
-            )
+            while mock_anime:
+                action, payload = display_anime_details(mock_anime)
+                if action == "watch":
+                    t_str, anilist_id = payload
+                    handle_episode_flow(
+                        anilist_id, 
+                        t_str, 
+                        pre_provider=selected_item.get("provider") if mock_anime.get("id") == selected_item["anilist_id"] else None,
+                        pre_category=selected_item.get("category") if mock_anime.get("id") == selected_item["anilist_id"] else None,
+                        ipc_server_path=ipc_server_path
+                    )
+                    break
+                elif action == "relation":
+                    mock_anime = payload
+                else:
+                    break
         else:
             console.print("[red]❌ Invalid option![/red]")
 
@@ -1387,9 +1627,10 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, _signal_cleanup)
     
     try:
+        start_backend()
         main()
     except KeyboardInterrupt:
-        console.print("\n\n[bold magenta]Goodbye! ✨ Logging out of Anilix[/bold magenta]")
+        console.print(f"\n\n[bold magenta]Goodbye! ✨ Logging out of {PROJECT_NAME}[/bold magenta]")
     except Exception as e:
         console.print(f"\n\n[bold red]❌ CRITICAL ERROR:[/bold red] {e}")
         console.print("[dim]Backend has been safely shut down.[/dim]")

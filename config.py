@@ -5,7 +5,7 @@ Stored in party_config.json in the project root.
 import json
 import os
 
-CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".json")
+CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 os.makedirs(CONFIG_DIR, exist_ok=True)
 CONFIG_PATH = os.path.join(CONFIG_DIR, "party_config.json")
 

@@ -270,11 +270,11 @@ from datetime import datetime
 import os
 
 # Ensure .logs directory exists
-log_dir = os.path.join(os.path.dirname(__file__), ".logs")
+log_dir = os.path.join(os.path.dirname(__file__), "data", "logs")
 os.makedirs(log_dir, exist_ok=True)
 
-# Configure logging to write to .logs/anilix_backend.log
-log_file_path = os.path.join(log_dir, "anilix_backend.log")
+# Configure logging to write to .logs/streamix_backend.log
+log_file_path = os.path.join(log_dir, "streamix_backend.log")
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -282,7 +282,7 @@ logging.basicConfig(
         logging.FileHandler(log_file_path, encoding='utf-8')
     ]
 )
-logger = logging.getLogger("anilix_party")
+logger = logging.getLogger("streamix_party")
 
 # Suppress noisy handshake errors from ngrok 0-byte TCP ping probes
 logging.getLogger("websockets.server").setLevel(logging.CRITICAL)
@@ -322,7 +322,7 @@ def start_server_and_tunnel(room_name, host_name, max_users=10, port=9000):
         logger.info(f"ngrok tunnel opened successfully: {public_url}")
         
         # Save room info for the admin client to read
-        json_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".json")
+        json_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
         os.makedirs(json_dir, exist_ok=True)
         party_info_path = os.path.join(json_dir, "party_info.json")
         with open(party_info_path, "w") as f:
