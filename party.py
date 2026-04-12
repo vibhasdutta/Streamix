@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import time
+import hashlib
 from pyngrok import ngrok
 import websockets
 from utils.os_detector import IS_WINDOWS
@@ -38,6 +39,10 @@ class WatchPartyServer:
         # Banned users set
         self.banned_users = set()
         
+        # IP to last-known-username mapping (to handle name changes on reconnection)
+        self.ip_to_name = {}
+        self.chat_history = [] # Rolling list of recent messages
+        
     def _broadcast(self, message, exclude_ws=None):
         out_msg = json.dumps(message, ensure_ascii=False)
         for ws in list(self.clients.keys()):
@@ -70,6 +75,7 @@ class WatchPartyServer:
                 "deafened": info["deafened"],
                 "online": info["online"],
                 "ip": info.get("ip", ""),
+                "hash_id": info.get("hash_id", ""),
                 "banned": name in self.banned_users
             })
         self._broadcast({"type": "user_list", "users": safe_users})
@@ -99,21 +105,45 @@ class WatchPartyServer:
                 await websocket.close(1008, "Banned")
                 return
 
-            # Get client IP from websocket
+            # Get client IP from websocket (with X-Forwarded-For support for ngrok)
             client_ip = "unknown"
             try:
-                client_ip = websocket.remote_address[0] if websocket.remote_address else "unknown"
+                # Check for X-Forwarded-For header (common for proxies like ngrok)
+                xfwd = websocket.request_headers.get("X-Forwarded-For")
+                if xfwd:
+                    # Take the first IP in the chain
+                    client_ip = xfwd.split(',')[0].strip()
+                else:
+                    client_ip = websocket.remote_address[0] if websocket.remote_address else "unknown"
             except:
                 pass
 
+            # Generate a safe Hash ID for display
+            hash_id = hashlib.md5(client_ip.encode()).hexdigest()[:6].upper()
+
+            # IP-based Identity Logic: If this IP has been here before under a different name,
+            # and that user is offline, rename the old record instead of creating a new one.
+            old_name = self.ip_to_name.get(client_ip)
+            if old_name and old_name != client_name and old_name in self.users:
+                if not self.users[old_name]['online']:
+                    user_info = self.users.pop(old_name)
+                    user_info['name'] = client_name
+                    user_info['online'] = True
+                    user_info['ws'] = websocket
+                    user_info['ip'] = client_ip
+                    user_info['hash_id'] = hash_id
+                    self.users[client_name] = user_info
+                    client_name = client_name # Update local var
+            
             if client_name in self.users:
-                if self.users[client_name]['online']:
+                if self.users[client_name]['online'] and self.users[client_name]['ws'] != websocket:
                     await websocket.close(1008, "Username already in use")
                     return
-                # Reconnecting
+                # Reconnecting or already online (migrated)
                 self.users[client_name]['online'] = True
                 self.users[client_name]['ws'] = websocket
                 self.users[client_name]['ip'] = client_ip
+                self.users[client_name]['hash_id'] = hash_id
             else:
                 # New user
                 current_online = sum(1 for u in self.users.values() if u['online'])
@@ -121,8 +151,10 @@ class WatchPartyServer:
                     await websocket.close(1008, "Room full")
                     return
                     
-                self.users[client_name] = {"name": client_name, "role": "member", "muted": False, "deafened": False, "online": True, "ws": websocket, "ip": client_ip}
+                self.users[client_name] = {"name": client_name, "role": "member", "muted": False, "deafened": False, "online": True, "ws": websocket, "ip": client_ip, "hash_id": hash_id}
             
+            # Update IP mapping
+            self.ip_to_name[client_ip] = client_name
             self.clients[websocket] = {'name': client_name}
             
             # Send initial state
@@ -137,7 +169,32 @@ class WatchPartyServer:
                 )
             )
             
-            self._broadcast({"type": "system", "message": f"{client_name} joined the room."})
+            # Send chat history to new user
+            if self.chat_history:
+                # Dynamically resolve names in history in case users changed them
+                resolved_history = []
+                # Map hash_id -> current online name
+                current_names = {u.get("hash_id"): u.get("name") for u in self.users.values() if u.get("hash_id")}
+                
+                for msg in self.chat_history:
+                    m = msg.copy()
+                    hid = m.get("hash_id")
+                    if hid in current_names:
+                        m["sender"] = current_names[hid]
+                    resolved_history.append(m)
+                
+                await websocket.send(json.dumps({
+                    "type": "chat_history",
+                    "history": resolved_history
+                }, ensure_ascii=False))
+            
+            self._broadcast({
+                "type": "system", 
+                "subtype": "join", 
+                "actor": client_name,
+                "role": self.users[client_name]['role'],
+                "message": f"{client_name} joined the room."
+            })
             self._broadcast_user_list()
             
             # Message loop
@@ -157,11 +214,18 @@ class WatchPartyServer:
                         )
                         continue
                     
-                    self._broadcast({
+                    chat_payload = {
                         "type": "chat",
                         "sender": client_name,
-                        "message": data.get("message", "")
-                    })
+                        "hash_id": user_info.get("hash_id"),
+                        "message": data.get("message", ""),
+                        "time": time.strftime("%H:%M")
+                    }
+                    self.chat_history.append(chat_payload)
+                    if len(self.chat_history) > 100:
+                        self.chat_history.pop(0)
+                        
+                    self._broadcast(chat_payload)
                     
                 elif msg_type == "sync":
                     if user_info['role'] != 'host':
@@ -258,7 +322,13 @@ class WatchPartyServer:
                 else:
                     # Remove non-host users entirely so they don't appear as ghosts
                     del self.users[client_name]
-                self._broadcast({"type": "system", "message": f"{client_name} left the room."})
+                self._broadcast({
+                    "type": "system", 
+                    "subtype": "leave", 
+                    "actor": client_name,
+                    "role": role,
+                    "message": f"{client_name} left the room."
+                })
                 self._broadcast_user_list()
                 
                 # If host leaves, completely terminate the server thereby disconnecting everyone

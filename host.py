@@ -3,6 +3,7 @@ import json
 import websockets
 import time
 import os
+import subprocess
 import threading
 from rich.console import Console
 from rich.layout import Layout
@@ -31,6 +32,7 @@ class PartyAdminTUI:
         self.room_name = "Watch Party Admin"
         self.input_text = ""
         self.system_messages = []
+        self.scroll_offset = 0 # Track how many lines we are scrolled up
         
         # Local-only filters (admin's own view, doesn't affect others)
         self.local_muted = set()
@@ -42,6 +44,7 @@ class PartyAdminTUI:
         self.volume = self.config.get("volume", 100)
         self.notifications_enabled = self.config.get("notifications", True)
         self.chat_limit = self.config.get("chat_history_limit", 50)
+        self._mpv_path = None # Cache for mpv path
         
         # Try to load info from file
         try:
@@ -52,8 +55,9 @@ class PartyAdminTUI:
         except:
             pass
 
-    def _append_chat(self, sender, message):
-        payload = {"sender": sender, "message": message}
+    def _append_chat(self, sender, message, ts=None):
+        if not ts: ts = time.strftime("%H:%M")
+        payload = {"sender": sender, "message": message, "time": ts}
         self.chat_history.append(f"{CHAT_TOKEN}{json.dumps(payload, ensure_ascii=False)}")
 
     def _play_notification(self):
@@ -85,6 +89,24 @@ class PartyAdminTUI:
                 s.sendall((json.dumps({"command": command}) + "\n").encode())
                 s.close()
         except Exception:
+            pass
+
+    def _play_event_sound(self, filename):
+        if not self.notifications_enabled:
+            return
+        
+        try:
+            if not self._mpv_path:
+                from main import get_mpv_path
+                self._mpv_path = get_mpv_path()
+            
+            if self._mpv_path:
+                sound_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sound_assests", filename)
+                if os.path.exists(sound_path):
+                    # Use Popen to play in background without blocking
+                    subprocess.Popen([self._mpv_path, "--no-video", "--no-terminal", sound_path], 
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except:
             pass
 
     async def connect_and_listen(self):
@@ -134,10 +156,22 @@ class PartyAdminTUI:
                         self._append_chat(sender, msg)
                         if sender != self.username:
                             self._play_notification()
+                            
+                    elif mt == "chat_history":
+                        history = data.get("history", [])
+                        for m in history:
+                            self._append_chat(m.get("sender"), m.get("message"), ts=m.get("time"))
+                            
                     elif mt == "system":
                         msg = data.get("message", "")
+                        subtype = data.get("subtype")
                         self.chat_history.append(f"[dim italic]{escape(msg)}[/dim italic]")
                         self.system_messages.append(msg)
+                        
+                        if subtype == "join" and data.get("role") == "member" and data.get("actor") != self.username:
+                            self._play_event_sound("joinin.mp3")
+                        elif subtype == "leave" and data.get("role") == "member" and data.get("actor") != self.username:
+                            self._play_event_sound("leave.mp3")
                     elif mt == "error":
                         msg = data.get("message", "")
                         self.chat_history.append(
@@ -180,65 +214,17 @@ class PartyAdminTUI:
                 "target": target
             }, ensure_ascii=False))
         # Local volume control
-        elif action == "/vol":
-            try:
-                level = int(target) if target else -1
-                if 0 <= level <= 150:
-                    await self._send_mpv_command(["set_property", "volume", level])
-                    self.volume = level
-                    from config import update_admin_config
-                    update_admin_config(volume=level)
-                    self.chat_history.append(f"[green]🔊 Volume set to {level}%[/green]")
-                else:
-                    self.chat_history.append("[yellow]Usage: /vol <0-150>[/yellow]")
-            except ValueError:
-                self.chat_history.append("[yellow]Usage: /vol <0-150>[/yellow]")
-        # Toggle notifications
-        elif action == "/notify":
-            self.notifications_enabled = not self.notifications_enabled
-            from config import update_admin_config
-            update_admin_config(notifications=self.notifications_enabled)
-            status = "enabled" if self.notifications_enabled else "disabled"
-            self.chat_history.append(f"[green]🔔 Notifications {status}[/green]")
-        # Local-only commands (only affect admin's own view)
-        elif action == "/lmute":
-            if not target:
-                if self.local_muted:
-                    self.chat_history.append(f"[yellow]Locally muted: {', '.join(self.local_muted)}[/yellow]")
-                else:
-                    self.chat_history.append("[yellow]No one locally muted. Usage: /lmute <user>[/yellow]")
-                return
-            if target in self.local_muted:
-                self.local_muted.discard(target)
-                self.chat_history.append(f"[green]Unmuted {target} (local only).[/green]")
-            else:
-                self.local_muted.add(target)
-                self.chat_history.append(f"[yellow]Muted {target} locally. Their messages are hidden for you only.[/yellow]")
-        elif action == "/ldeafen":
-            if not target:
-                if self.local_deafened:
-                    self.chat_history.append(f"[yellow]Locally deafened: {', '.join(self.local_deafened)}[/yellow]")
-                else:
-                    self.chat_history.append("[yellow]No one locally deafened. Usage: /ldeafen <user>[/yellow]")
-                return
-            if target in self.local_deafened:
-                self.local_deafened.discard(target)
-                self.chat_history.append(f"[green]Undeafened {target} (local only).[/green]")
-            else:
-                self.local_deafened.add(target)
-                self.chat_history.append(f"[yellow]Deafened {target} locally. Hidden for you only.[/yellow]")
         elif action == "/help":
             self.chat_history.append("[bold]── Global (affects everyone) ──[/bold]")
             self.chat_history.append("[cyan]/kick <user>[/cyan] — Remove from room")
-            self.chat_history.append("[cyan]/mute <user>[/cyan] — Server-wide mute (can't send messages)")
+            self.chat_history.append("[cyan]/mute <user>[/cyan] — Server-wide mute")
             self.chat_history.append("[cyan]/deafen <user>[/cyan] — Server-wide deafen")
             self.chat_history.append("[cyan]/ban <user>[/cyan] — Ban from room")
             self.chat_history.append("[cyan]/unban <user>[/cyan] — Unban a user")
             self.chat_history.append("[bold]── Local (only for you) ──[/bold]")
-            self.chat_history.append("[cyan]/vol <0-150>[/cyan] — Set your video volume")
+            self.chat_history.append("[cyan]Ctrl+W[/cyan] — Scroll Up chat")
+            self.chat_history.append("[cyan]Ctrl+S[/cyan] — Scroll Down chat")
             self.chat_history.append("[cyan]/notify[/cyan] — Toggle notification sounds")
-            self.chat_history.append("[cyan]/lmute <user>[/cyan] — Hide their messages for you")
-            self.chat_history.append("[cyan]/ldeafen <user>[/cyan] — Hide their activity for you")
             self.chat_history.append("[cyan]/close[/cyan] — Close this window")
         elif action in ["/exit", "/close"]:
             self.running = False
@@ -273,7 +259,7 @@ class PartyAdminTUI:
         user_table = Table(show_header=True, expand=True, box=None)
         user_table.add_column("")
         user_table.add_column("Name")
-        user_table.add_column("IP", style="dim")
+        user_table.add_column("ID", style="dim")
         
         for u in self.users:
             if u.get('role') == 'host':
@@ -282,7 +268,7 @@ class PartyAdminTUI:
                 status = "🟢" if u.get('online') else "🔴"
                 
             name = u.get("name", "Unknown")
-            ip = u.get("ip", "")
+            uid = u.get("hash_id", "")
             name_styled = name
             
             flags = []
@@ -294,7 +280,7 @@ class PartyAdminTUI:
             if flags:
                 name_styled += f" [{' '.join(flags)}]"
                 
-            user_table.add_row(status, name_styled, ip)
+            user_table.add_row(status, name_styled, uid)
             
         layout["users"].update(Panel(user_table, title="Users", border_style="cyan"))
         
@@ -302,7 +288,12 @@ class PartyAdminTUI:
         import shutil
         max_lines = max(5, shutil.get_terminal_size().lines - 10)
         chat_content = self._render_chat_feed(max_lines)
-        layout["chat"].update(Panel(Align(chat_content, vertical="bottom"), title="Chat & Activity", border_style="blue"))
+        
+        chat_title = "Chat & Activity"
+        if self.scroll_offset > 0:
+            chat_title += f" [yellow](Scrolled: {self.scroll_offset})[/yellow]"
+            
+        layout["chat"].update(Panel(Align(chat_content, vertical="bottom"), title=chat_title, border_style="blue"))
         
         # Input
         input_panel = Panel(
@@ -316,18 +307,24 @@ class PartyAdminTUI:
 
     def _render_chat_feed(self, max_lines):
         chat_rows = []
-        for entry in self.chat_history[-max_lines:]:
+        
+        # Calculate view window
+        total = len(self.chat_history)
+        end = total - self.scroll_offset
+        start = max(0, end - max_lines)
+        end = max(0, end)
+        
+        for entry in self.chat_history[start:end]:
             if entry.startswith(CHAT_TOKEN):
                 try:
                     payload = json.loads(entry[len(CHAT_TOKEN):])
+                    sender = payload.get("sender", "Unknown")
+                    message = payload.get("message", "")
+                    ts = payload.get("time", "")
+                    color = "magenta" if sender == self.username else "cyan"
+                    chat_rows.append(Text.from_markup(f"[dim]{ts}[/dim] [bold {color}]{escape(sender)}[/bold {color}] » {escape(message)}"))
                 except Exception:
                     chat_rows.append(Text.from_markup(entry))
-                    continue
-
-                sender = payload.get("sender", "Unknown")
-                message = payload.get("message", "")
-                color = "magenta" if sender == self.username else "cyan"
-                chat_rows.append(Text.from_markup(f"[bold {color}]{escape(sender)}[/bold {color}] :: {escape(message)}"))
             else:
                 chat_rows.append(Text.from_markup(entry))
         return Group(*chat_rows) if chat_rows else Text("")
@@ -351,9 +348,17 @@ class PartyAdminTUI:
                             else:
                                 await self.send_chat(self.input_text)
                             self.input_text = ""
+                    elif c == '\x17': # Ctrl+W (Scroll Up)
+                        self.scroll_offset += 5
+                        if self.scroll_offset > len(self.chat_history):
+                            self.scroll_offset = len(self.chat_history)
+                    elif c == '\x13': # Ctrl+S (Scroll Down)
+                        self.scroll_offset = max(0, self.scroll_offset - 5)
                     else:
                         if c.isprintable():
                             self.input_text += c
+                            # Auto-reset scroll on activity if at bottom
+                            if self.scroll_offset < 2: self.scroll_offset = 0
             except Exception as e:
                 pass
             await asyncio.sleep(0.01)

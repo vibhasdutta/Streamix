@@ -30,6 +30,7 @@ class PartyClient:
         self.chat_history = []
         self.users = []
         self.input_text = ""
+        self.scroll_offset = 0 # Track how many lines we are scrolled up
         self.mpv_process = None
         self.mpv_ipc_path = fr"\\.\pipe\anilix_client_{int(time.time())}" if IS_WINDOWS else f"/tmp/anilix_client_{int(time.time())}.sock"
         
@@ -45,8 +46,9 @@ class PartyClient:
         self.notifications_enabled = self.config.get("notifications", True)
         self.chat_limit = self.config.get("chat_history_limit", 50)
 
-    def _append_chat(self, sender, message):
-        payload = {"sender": sender, "message": message}
+    def _append_chat(self, sender, message, ts=None):
+        if not ts: ts = time.strftime("%H:%M")
+        payload = {"sender": sender, "message": message, "time": ts}
         self.chat_history.append(f"{CHAT_TOKEN}{json.dumps(payload, ensure_ascii=False)}")
 
     async def _send_mpv_command(self, command):
@@ -82,16 +84,17 @@ class PartyClient:
         except Exception:
             return None
 
-    def _play_notification(self):
+    def _play_event_sound(self, filename):
         if not self.notifications_enabled:
             return
         try:
             from main import get_mpv_path
             mpv_path = get_mpv_path()
             if mpv_path:
-                sound_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sound_assests", "notification.mp3")
+                sound_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sound_assests", filename)
                 if os.path.exists(sound_path):
-                    subprocess.Popen([mpv_path, "--no-video", "--no-terminal", sound_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    subprocess.Popen([mpv_path, "--no-video", "--no-terminal", sound_path], 
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             pass
 
@@ -177,11 +180,22 @@ class PartyClient:
                             continue
                         self._append_chat(sender, msg)
                         if sender != self.username:
-                            self._play_notification()
+                            self._play_event_sound("notification.mp3")
+                            
+                    elif mt == "chat_history":
+                        history = data.get("history", [])
+                        for m in history:
+                            self._append_chat(m.get("sender"), m.get("message"), ts=m.get("time"))
                         
                     elif mt == "system":
                         msg = data.get("message", "")
+                        subtype = data.get("subtype")
                         self.chat_history.append(f"[dim italic]{escape(msg)}[/dim italic]")
+                        
+                        if subtype == "join" and data.get("role") == "member" and data.get("actor") != self.username:
+                            self._play_event_sound("joinin.mp3")
+                        elif subtype == "leave" and data.get("role") == "member" and data.get("actor") != self.username:
+                            self._play_event_sound("leave.mp3")
                         
                     elif mt == "sync":
                         playback = data.get("playback", {})
@@ -262,6 +276,7 @@ class PartyClient:
             f"--input-ipc-server={self.mpv_ipc_path}",
             "--referrer=https://kwik.cx/",
             "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "--fs",
             url
         ]
         
@@ -316,21 +331,9 @@ class PartyClient:
             else:
                 self.chat_history.append("[dim]No user list yet.[/dim]")
         
-        elif action == "/vol":
-            try:
-                level = int(target) if target else -1
-                if 0 <= level <= 150:
-                    asyncio.create_task(self._send_mpv_command(["set_property", "volume", level]))
-                    self.chat_history.append(f"[green]🔊 Volume set to {level}%[/green]")
-                else:
-                    self.chat_history.append("[yellow]Usage: /vol <0-150>[/yellow]")
-            except ValueError:
-                self.chat_history.append("[yellow]Usage: /vol <0-150>[/yellow]")
-                
         elif action == "/help":
-            self.chat_history.append("[cyan]/mute <user>[/cyan] — Toggle hide their messages (local only)")
-            self.chat_history.append("[cyan]/deafen <user>[/cyan] — Toggle hide their chat & activity (local only)")
-            self.chat_history.append("[cyan]/vol <0-150>[/cyan] — Set your video volume")
+            self.chat_history.append("[cyan]Ctrl+W[/cyan] — Scroll Up chat")
+            self.chat_history.append("[cyan]Ctrl+S[/cyan] — Scroll Down chat")
             self.chat_history.append("[cyan]/users[/cyan] — List online users")
             self.chat_history.append("[cyan]/close[/cyan] — Close this window")
             self.chat_history.append("[cyan]/help[/cyan] — Show this help")
@@ -341,18 +344,24 @@ class PartyClient:
 
     def _render_chat_feed(self, max_lines):
         chat_rows = []
-        for entry in self.chat_history[-max_lines:]:
+        
+        # Calculate view window
+        total = len(self.chat_history)
+        end = total - self.scroll_offset
+        start = max(0, end - max_lines)
+        end = max(0, end)
+        
+        for entry in self.chat_history[start:end]:
             if entry.startswith(CHAT_TOKEN):
                 try:
                     payload = json.loads(entry[len(CHAT_TOKEN):])
+                    sender = payload.get("sender", "Unknown")
+                    message = payload.get("message", "")
+                    ts = payload.get("time", "")
+                    color = "magenta" if sender == self.username else "cyan"
+                    chat_rows.append(Text.from_markup(f"[dim]{ts}[/dim] [bold {color}]{escape(sender)}[/bold {color}] » {escape(message)}"))
                 except Exception:
                     chat_rows.append(Text.from_markup(entry))
-                    continue
-
-                sender = payload.get("sender", "Unknown")
-                message = payload.get("message", "")
-                color = "magenta" if sender == self.username else "cyan"
-                chat_rows.append(Text.from_markup(f"[bold {color}]{escape(sender)}[/bold {color}] :: {escape(message)}"))
             else:
                 chat_rows.append(Text.from_markup(entry))
         return Group(*chat_rows) if chat_rows else Text("")
@@ -392,7 +401,12 @@ class PartyClient:
         import shutil
         max_lines = max(5, shutil.get_terminal_size().lines - 10)
         chat_content = self._render_chat_feed(max_lines)
-        layout["chat"].update(Panel(Align(chat_content, vertical="bottom"), title="Chat", border_style="blue"))
+        
+        chat_title = "Chat"
+        if self.scroll_offset > 0:
+            chat_title += f" [yellow](Scrolled: {self.scroll_offset})[/yellow]"
+            
+        layout["chat"].update(Panel(Align(chat_content, vertical="bottom"), title=chat_title, border_style="blue"))
         
         input_panel = Panel(
             f"> {self.input_text}█",
@@ -424,9 +438,17 @@ class PartyClient:
                                     )
                                 )
                             self.input_text = ""
+                    elif c == '\x17': # Ctrl+W (Scroll Up)
+                        self.scroll_offset += 5
+                        if self.scroll_offset > len(self.chat_history):
+                            self.scroll_offset = len(self.chat_history)
+                    elif c == '\x13': # Ctrl+S (Scroll Down)
+                        self.scroll_offset = max(0, self.scroll_offset - 5)
                     else:
                         if c.isprintable():
                             self.input_text += c
+                            # Auto-reset scroll on activity if at bottom
+                            if self.scroll_offset < 2: self.scroll_offset = 0
             except Exception as e:
                 pass
             await asyncio.sleep(0.01)
