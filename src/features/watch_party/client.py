@@ -1,4 +1,5 @@
 import asyncio
+import uuid
 
 import sys
 import os
@@ -23,6 +24,7 @@ from rich.console import Group
 from shared.utils.os_detector import IS_WINDOWS
 from features.voice_chat.voice_manager import VoiceManager
 from shared.utils.logger import setup_logger
+from core.paths import SOUND_ASSETS_DIR
 
 # Initialize client session logger
 logger = setup_logger("client_tui", "client_session.log")
@@ -43,7 +45,8 @@ class PartyClient:
         self.input_text = ""
         self.scroll_offset = 0 # Track how many lines we are scrolled up
         self.mpv_process = None
-        self.mpv_ipc_path = fr"\\.\pipe\streamix_client_{int(time.time())}" if IS_WINDOWS else f"/tmp/streamix_client_{int(time.time())}.sock"
+        unique_id = uuid.uuid4().hex[:10]
+        self.mpv_ipc_path = fr"\\.\pipe\streamix_client_{unique_id}" if IS_WINDOWS else f"/tmp/streamix_client_{unique_id}.sock"
         
         # Local-only filters (only affect this user's view)
         self.local_muted = set()
@@ -64,7 +67,8 @@ class PartyClient:
         
         self.voice_manager = None
         self.chat_limit = self.config.get("chat_history_limit", 50)
-        self._last_sound_time = 0 # Cooldown for sounds
+        self._last_sound_times = {}
+        self._mpv_path = None
 
     def _append_chat(self, sender, message, ts=None):
         if not ts: ts = time.strftime("%H:%M")
@@ -107,20 +111,24 @@ class PartyClient:
     def _play_event_sound(self, filename):
         if not self.notifications_enabled:
             return
-            
-        # 2 second cooldown for sounds to prevent spam
+
+        # Per-sound cooldown keeps rapid chat alerts responsive without spam.
         now = time.time()
-        if now - getattr(self, '_last_sound_time', 0) < 2.0:
+        cooldown = 0.35 if filename == "notification.mp3" else 0.8
+        last_time = self._last_sound_times.get(filename, 0.0)
+        if now - last_time < cooldown:
             return
-        self._last_sound_time = now
+        self._last_sound_times[filename] = now
         
         try:
-            from shared.media import get_mpv_path
-            mpv_path = get_mpv_path()
-            if mpv_path:
-                sound_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sound_assets", filename)
-                if os.path.exists(sound_path):
-                    subprocess.Popen([mpv_path, "--no-video", "--no-terminal", sound_path], 
+            if not self._mpv_path:
+                from shared.media import get_mpv_path
+                self._mpv_path = get_mpv_path()
+
+            if self._mpv_path:
+                sound_path = SOUND_ASSETS_DIR / filename
+                if sound_path.exists():
+                    subprocess.Popen([self._mpv_path, "--no-video", "--no-terminal", str(sound_path)], 
                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             pass
@@ -242,7 +250,9 @@ class PartyClient:
                             timestamp = playback.get('timestamp', 0)
                             state = playback.get('state', 'paused')
                             
-                            self._launch_mpv(url, title, timestamp)
+                            launched = self._launch_mpv(url, title, timestamp)
+                            if launched:
+                                self.current_video_url = url
                             
                             # pause if host is paused
                             if state == 'paused':
@@ -333,19 +343,27 @@ class PartyClient:
                                     try: self.mpv_process.terminate()
                                     except: pass
                                     self.mpv_process = None
-                                    self.current_video_url = None
+                                self.current_video_url = None
                                 continue  # Skip the rest of the sync logic
                             
-                            # Auto-launch or restart mpv if video changed
-                            if url and hasattr(self, 'current_video_url') and self.current_video_url != url:
+                            # Auto-launch or restart mpv when needed.
+                            # This also recovers if local MPV exits while the host keeps playing
+                            # the same URL (common on same-device host/client testing).
+                            process_missing = (not getattr(self, 'mpv_process', None)) or (self.mpv_process.poll() is not None)
+                            needs_relaunch = (self.current_video_url != url) or process_missing
+
+                            if url and needs_relaunch:
                                 if getattr(self, 'mpv_process', None):
                                     try:
                                         self.mpv_process.terminate()
                                     except:
                                         pass
-                                self._launch_mpv(url, title, timestamp)
-                                self.current_video_url = url
-                                await asyncio.sleep(1) # wait for mpv IPC
+                                launched = self._launch_mpv(url, title, timestamp)
+                                if launched:
+                                    self.current_video_url = url
+                                    await asyncio.sleep(1) # wait for mpv IPC
+                                else:
+                                    self.current_video_url = None
                                 
                             # Sync mpv (sync is never locally filtered — host controls playback)
                             await self._send_mpv_command(["set_property", "pause", state == "paused"])
@@ -407,7 +425,14 @@ class PartyClient:
         mpv_path = get_mpv_path()
         if not mpv_path:
             self.chat_history.append("[bold red]mpv not found! Cannot sync video.[/bold red]")
-            return
+            return False
+
+        # On Unix, stale IPC socket files can prevent mpv from starting.
+        if not IS_WINDOWS and os.path.exists(self.mpv_ipc_path):
+            try:
+                os.remove(self.mpv_ipc_path)
+            except Exception as e:
+                logger.warning(f"[LIFECYCLE] Could not remove stale mpv IPC socket: {e}")
 
         args = [
             mpv_path,
@@ -428,8 +453,19 @@ class PartyClient:
         
         args.append(url)
         
-        self.mpv_process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        logger.info(f"[LIFECYCLE] MPV process launched (PID: {self.mpv_process.pid}) for URL: {url}")
+        try:
+            self.mpv_process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            logger.info(f"[LIFECYCLE] MPV process launched (PID: {self.mpv_process.pid}) for URL: {url}")
+            if self.mpv_process.poll() is not None:
+                self.chat_history.append("[bold red]Player exited immediately. Retrying on next sync...[/bold red]")
+                self.mpv_process = None
+                return False
+            return True
+        except Exception as e:
+            logger.error(f"[LIFECYCLE] Failed to launch MPV in client: {e}", exc_info=True)
+            self.chat_history.append(f"[bold red]Failed to launch player:[/bold red] {e}")
+            self.mpv_process = None
+            return False
         
     async def broadcast_voice_state(self):
         if self.ws:

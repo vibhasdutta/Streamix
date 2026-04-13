@@ -24,6 +24,7 @@ from shared.utils.os_detector import IS_WINDOWS
 from features.voice_chat.voice_manager import VoiceManager
 from shared.utils.logger import setup_logger
 from core.paths import PARTY_INFO_PATH
+from core.paths import SOUND_ASSETS_DIR
 
 # Initialize host session logger
 logger = setup_logger("host_tui", "host_session.log")
@@ -66,7 +67,7 @@ class PartyAdminTUI:
         self.voice_manager = None
         self.chat_limit = self.config.get("chat_history_limit", 50)
         self._mpv_path = None # Cache for mpv path
-        self._last_sound_time = 0 # Cooldown for sounds
+        self._last_sound_times = {}
         
         # Try to load info from file
         try:
@@ -89,10 +90,10 @@ class PartyAdminTUI:
             from shared.media import get_mpv_path
             mpv_path = get_mpv_path()
             if mpv_path:
-                sound_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sound_assests", "notification.mp3")
+                sound_path = SOUND_ASSETS_DIR / "notification.mp3"
                 import subprocess
-                if os.path.exists(sound_path):
-                    subprocess.Popen([mpv_path, "--no-video", "--no-terminal", sound_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if sound_path.exists():
+                    subprocess.Popen([mpv_path, "--no-video", "--no-terminal", str(sound_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             pass
 
@@ -116,12 +117,14 @@ class PartyAdminTUI:
     def _play_event_sound(self, filename):
         if not self.notifications_enabled:
             return
-            
-        # 2 second cooldown for sounds to prevent spam
+
+        # Per-sound cooldown keeps rapid chat alerts responsive without spam.
         now = time.time()
-        if now - self._last_sound_time < 2.0:
+        cooldown = 0.35 if filename == "notification.mp3" else 0.8
+        last_time = self._last_sound_times.get(filename, 0.0)
+        if now - last_time < cooldown:
             return
-        self._last_sound_time = now
+        self._last_sound_times[filename] = now
         
         try:
             if not self._mpv_path:
@@ -129,10 +132,10 @@ class PartyAdminTUI:
                 self._mpv_path = get_mpv_path()
             
             if self._mpv_path:
-                sound_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sound_assets", filename)
-                if os.path.exists(sound_path):
+                sound_path = SOUND_ASSETS_DIR / filename
+                if sound_path.exists():
                     # Use Popen to play in background without blocking
-                    subprocess.Popen([self._mpv_path, "--no-video", "--no-terminal", sound_path], 
+                    subprocess.Popen([self._mpv_path, "--no-video", "--no-terminal", str(sound_path)], 
                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except:
             pass
@@ -620,6 +623,8 @@ class PartyAdminTUI:
             return
             
         import socket
+        not_alive_streak = 0
+        closed_sent = False
         
         while self.running and not self.ws:
             await asyncio.sleep(1)
@@ -693,6 +698,8 @@ class PartyAdminTUI:
                 # When MPV is closed (host picking new episode), send paused state to freeze clients
                 if self.ws:
                     if mpv_alive and current_url:
+                        not_alive_streak = 0
+                        closed_sent = False
                         payload = {
                             "type": "sync",
                             "state": "paused" if pause_state else "playing",
@@ -702,12 +709,16 @@ class PartyAdminTUI:
                         if current_title: payload["anime_title"] = current_title
                         await self.ws.send(json.dumps(payload, ensure_ascii=False))
                     elif not mpv_alive:
-                        # MPV is closed — tell clients to close their players too
-                        await self.ws.send(json.dumps({
-                            "type": "sync",
-                            "state": "closed",
-                            "timestamp": 0
-                        }))
+                        # Debounce transient IPC misses to avoid flapping client players.
+                        not_alive_streak += 1
+                        if not closed_sent and not_alive_streak >= 6:
+                            # MPV appears truly closed for ~2s (6 * 0.33s).
+                            await self.ws.send(json.dumps({
+                                "type": "sync",
+                                "state": "closed",
+                                "timestamp": 0
+                            }))
+                            closed_sent = True
                     
             except Exception:
                 pass

@@ -192,11 +192,14 @@ def stop_backend(stop_party=True):
                 subprocess.run(["taskkill", "/F", "/IM", "ngrok.exe", "/T"], 
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             else:
-                # Unix-like cleanup
-                # pkill returns non-zero if no process found, so ignore errors
+                # Unix-like cleanup: terminate party server first so host/client
+                # receive websocket closure and can show their session countdown.
+                subprocess.run(["pkill", "-f", os.path.join(os.path.dirname(__file__), "features", "watch_party", "party.py")], stderr=subprocess.DEVNULL)
+                # Allow client/host UIs to process close event and exit gracefully.
+                time.sleep(3.5)
+                # Fallback cleanup for stragglers only.
                 subprocess.run(["pkill", "-f", os.path.join(os.path.dirname(__file__), "features", "watch_party", "host.py")], stderr=subprocess.DEVNULL)
                 subprocess.run(["pkill", "-f", os.path.join(os.path.dirname(__file__), "features", "watch_party", "client.py")], stderr=subprocess.DEVNULL)
-                subprocess.run(["pkill", "-f", os.path.join(os.path.dirname(__file__), "features", "watch_party", "party.py")], stderr=subprocess.DEVNULL)
                 subprocess.run(["pkill", "-9", "ngrok"], stderr=subprocess.DEVNULL)
         except Exception:
             pass
@@ -449,6 +452,12 @@ def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=Fal
         args.append("--term-status-msg=STREAMIX_POS=${=time-pos}|${=duration}")
 
         args.append(url)
+
+        if ipc_server and not IS_WINDOWS and os.path.exists(ipc_server):
+            try:
+                os.remove(ipc_server)
+            except Exception as e:
+                logger.warning(f"[LIFECYCLE] Could not remove stale host IPC socket {ipc_server}: {e}")
         
         try:
             if ipc_server and party_proc:
@@ -1684,4 +1693,6 @@ if __name__ == "__main__":
         console.print(f"\n\n[bold red]❌ CRITICAL ERROR:[/bold red] {e}")
         console.print("[dim]Backend has been safely shut down.[/dim]")
     finally:
-        stop_backend(stop_party=False)
+        # If the launcher exits while a hosted party session is active,
+        # tear down party processes as well.
+        stop_backend(stop_party=party_active_flag.is_set())

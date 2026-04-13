@@ -10,6 +10,7 @@ CACHE_DIR = DATA_DIR / "cache"
 PARTY_INFO_PATH = DATA_DIR / "party_info.json"
 PARTY_CONFIG_PATH = DATA_DIR / "party_config.json"
 BANNER_PATH = ASSETS_DIR / "banner.txt"
+SOUND_ASSETS_DIR = PROJECT_ROOT / "sound_assets"
 
 
 def ensure_data_directories():
