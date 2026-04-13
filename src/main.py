@@ -284,12 +284,14 @@ def _open_in_new_terminal(script_name, args, title="Streamix"):
     proc = None
 
     if current_os is OS.WINDOWS:
-        # Windows: open a new cmd window
-        command = f'cd /d "{project_root}" && "{py}" run "{script}"'
-        if args:
-            command += " " + " ".join(f'"{a}"' for a in args)
+        # Windows: launch in a dedicated console to avoid fragile start/cmd quoting.
+        args_cmd = subprocess.list2cmdline([str(a) for a in args]) if args else ""
+        command = f'cd /d "{project_root}" && uv run "{script}"'
+        if args_cmd:
+            command += f" {args_cmd}"
         logger.info(f"[LIFECYCLE] Launching {script_name} in new Windows Terminal: {title}")
-        proc = subprocess.Popen(["cmd", "/c", "start", "", "cmd", "/c", command])
+        create_new_console = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+        proc = subprocess.Popen(["cmd", "/k", command], creationflags=create_new_console)
 
     elif current_os is OS.MACOS:
         # macOS: open a new Terminal.app window via AppleScript
@@ -318,8 +320,6 @@ def _open_in_new_terminal(script_name, args, title="Streamix"):
         else:
             console.print("[red]Could not find a suitable terminal emulator![/red]")
     
-    if proc:
-        active_subprocesses.append(proc)
     return proc
 
 def start_backend():
