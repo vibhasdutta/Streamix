@@ -13,6 +13,8 @@ import atexit
 import shutil
 import platform
 import hashlib
+import shlex
+import getpass
 from core.config import (
     load_config, 
     update_admin_config, 
@@ -20,7 +22,7 @@ from core.config import (
     get_admin_config,
     get_client_config
 )
-from core.paths import CACHE_DIR, DATA_DIR, LOGS_DIR, PARTY_INFO_PATH, ensure_data_directories
+from core.paths import BANNER_PATH, CACHE_DIR, DATA_DIR, LOGS_DIR, PARTY_INFO_PATH, ensure_data_directories
 from rich.console import Console
 from rich.table import Table
 from rich.prompt import Prompt
@@ -44,7 +46,6 @@ from shared.utils.os_detector import (
     RAW_OS_VERSION,
     current_os,
 )
-from shared.utils.logger import setup_logger
 
 # Initialize centralized lifecycle logger
 logger = setup_logger("main_hub", "streamix_backend.log")
@@ -132,8 +133,12 @@ def status_after(text, center=False):
         yield
 
 _is_cleaning_up = False
-def stop_backend():
-    """Full cleanup of ALL Streamix processes: backend, party server, ngrok, Terminal windows, IPC sockets."""
+def stop_backend(stop_party=True):
+    """Cleanup Streamix backend resources.
+
+    If stop_party is False, active watch-party room processes (party server,
+    ngrok tunnel, host/client chat terminals) are intentionally preserved.
+    """
     global _is_cleaning_up
     if _is_cleaning_up:
         return
@@ -162,6 +167,9 @@ def stop_backend():
     global active_subprocesses
     for proc in active_subprocesses:
         try:
+            if (not stop_party) and party_proc and proc is party_proc:
+                # Keep detached party room alive when launcher exits.
+                continue
             if proc.poll() is None:
                 logger.info(f"[LIFECYCLE] Terminating subprocess (PID: {proc.pid})")
                 proc.terminate()
@@ -175,53 +183,31 @@ def stop_backend():
     active_subprocesses.clear()
     logger.info("[LIFECYCLE] System cleanup completed.")
             
-    # Kill party Python processes and ngrok
-    try:
-        import signal
-        if IS_WINDOWS:
-            # Use taskkill but catch any issues
-            subprocess.run(["taskkill", "/F", "/IM", "ngrok.exe", "/T"], 
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        else:
-            # Unix-like cleanup
-            # pkill returns non-zero if no process found, so ignore errors
-            subprocess.run(["pkill", "-f", os.path.join(os.path.dirname(__file__), "features", "watch_party", "host.py")], stderr=subprocess.DEVNULL)
-            subprocess.run(["pkill", "-f", os.path.join(os.path.dirname(__file__), "features", "watch_party", "client.py")], stderr=subprocess.DEVNULL)
-            subprocess.run(["pkill", "-f", os.path.join(os.path.dirname(__file__), "features", "watch_party", "party.py")], stderr=subprocess.DEVNULL)
-            subprocess.run(["pkill", "-9", "ngrok"], stderr=subprocess.DEVNULL)
-    except Exception:
-        pass
-    
-    # Give Terminal windows a moment to close via '; exit', then force-close stragglers
-    if IS_MACOS:
+    # Kill party Python processes and ngrok only when explicitly requested.
+    if stop_party:
         try:
-            time.sleep(0.5)
-            # Close any Terminal windows where the shell has already exited
-            applescript = '''
-            tell application "Terminal"
-                repeat with w in windows
-                    try
-                        repeat with t in tabs of w
-                            if busy of t is false then
-                                close w saving no
-                                exit repeat
-                            end if
-                        end repeat
-                    end try
-                end repeat
-            end tell
-            '''
-            subprocess.run(["osascript", "-e", applescript],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+            import signal
+            if IS_WINDOWS:
+                # Use taskkill but catch any issues
+                subprocess.run(["taskkill", "/F", "/IM", "ngrok.exe", "/T"], 
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                # Unix-like cleanup
+                # pkill returns non-zero if no process found, so ignore errors
+                subprocess.run(["pkill", "-f", os.path.join(os.path.dirname(__file__), "features", "watch_party", "host.py")], stderr=subprocess.DEVNULL)
+                subprocess.run(["pkill", "-f", os.path.join(os.path.dirname(__file__), "features", "watch_party", "client.py")], stderr=subprocess.DEVNULL)
+                subprocess.run(["pkill", "-f", os.path.join(os.path.dirname(__file__), "features", "watch_party", "party.py")], stderr=subprocess.DEVNULL)
+                subprocess.run(["pkill", "-9", "ngrok"], stderr=subprocess.DEVNULL)
         except Exception:
             pass
     
-    # Cleanup party info file
-    try:
-        if PARTY_INFO_PATH.exists():
-            PARTY_INFO_PATH.unlink()
-    except Exception:
-        pass
+    # Cleanup party info file only when room teardown is requested.
+    if stop_party:
+        try:
+            if PARTY_INFO_PATH.exists():
+                PARTY_INFO_PATH.unlink()
+        except Exception:
+            pass
     
     # Cleanup any leftover IPC socket files (Unix only)
     if not IS_WINDOWS:
@@ -266,29 +252,6 @@ def _cleanup_party():
     except:
         pass
     
-    # Close leftover Terminal windows on macOS
-    if IS_MACOS:
-        try:
-            time.sleep(0.3)
-            applescript = '''
-            tell application "Terminal"
-                repeat with w in windows
-                    try
-                        repeat with t in tabs of w
-                            if busy of t is false then
-                                close w saving no
-                                exit repeat
-                            end if
-                        end repeat
-                    end try
-                end repeat
-            end tell
-            '''
-            subprocess.run(["osascript", "-e", applescript],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
-        except Exception:
-            pass
-    
     # Remove party_info.json so the next host doesn't read stale data
     try:
         if PARTY_INFO_PATH.exists():
@@ -318,10 +281,11 @@ def _open_in_new_terminal(script_name, args, title="Streamix"):
 
     if current_os is OS.WINDOWS:
         # Windows: open a new cmd window
-        args_str = ' '.join(f'\"{a}\"' for a in args)
-        cmd = f'start "{title}" cmd /c "\"{py}\" run \"{script}\" {args_str}"'
+        command = f'"{py}" run "{script}"'
+        if args:
+            command += " " + " ".join(f'"{a}"' for a in args)
         logger.info(f"[LIFECYCLE] Launching {script_name} in new Windows Terminal: {title}")
-        proc = subprocess.Popen(cmd, shell=True)
+        proc = subprocess.Popen(["cmd", "/c", "start", "", "cmd", "/c", command])
 
     elif current_os is OS.MACOS:
         # macOS: open a new Terminal.app window via AppleScript
@@ -343,7 +307,8 @@ def _open_in_new_terminal(script_name, args, title="Streamix"):
                 shutil.which("alacritty") or 
                 shutil.which("xterm"))
         if term:
-            cmd_args = [term, "-e", py, "run", script] + list(args)
+            command = " ".join(shlex.quote(part) for part in ([py, "run", script] + list(args)))
+            cmd_args = [term, "-e", "bash", "-lc", f"{command}; exit"]
             proc = subprocess.Popen(cmd_args)
         else:
             console.print("[red]Could not find a suitable terminal emulator![/red]")
@@ -354,21 +319,14 @@ def _open_in_new_terminal(script_name, args, title="Streamix"):
 
 def start_backend():
     global backend_process
-    # Check if a server is already running on 8000
-    try:
-        requests.get(API_BASE, timeout=1)
-        return
-    except requests.RequestException:
-        pass
 
     # ── Display Header ──
     console.clear()
     console.print()  # Spacer
-    
-    banner_path = os.path.join(os.path.dirname(__file__), "banner.txt")
-    if os.path.exists(banner_path):
+
+    if BANNER_PATH.exists():
         try:
-            with open(banner_path, "r", encoding="utf-8") as f:
+            with open(BANNER_PATH, "r", encoding="utf-8") as f:
                 banner_text = f.read()
                 console.print(Align.center(Text(banner_text, style="bold cyan")))
         except Exception:
@@ -379,6 +337,13 @@ def start_backend():
     console.print(Align.center(f"[bold magenta]v{VERSION}[/bold magenta] [dim]|[/dim] [dim]Made with 💖 by [bold cyan]Vibhas Dutta[/bold cyan][/dim]"))
     console.print(Align.center(Rule(style="dim cyan"), width=60))
     console.print()
+
+    # Check if a server is already running on 8000
+    try:
+        requests.get(API_BASE, timeout=1)
+        return
+    except requests.RequestException:
+        pass
 
     # ── Start Backend ──
     with status_after(f"[bold yellow]🚀 Initializing {PROJECT_NAME} backend server[/bold yellow]", center=True):
@@ -398,7 +363,7 @@ def start_backend():
                 stderr=log_file
             )
             logger.info(f"[LIFECYCLE] Backend server started successfully (PID: {backend_process.pid})")
-            atexit.register(stop_backend)
+            atexit.register(lambda: stop_backend(stop_party=False))
             
             # Wait for backend to be ready
             max_attempts = 15
@@ -1365,8 +1330,6 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None,
                     break
 
 def main():
-    start_backend()
-    
     # Persistent state across views
     search_history = []
     view = "home" # "home", "party", "dashboard"
@@ -1466,7 +1429,7 @@ def main():
                 ipc_server_path = fr"\\.\pipe\streamix_host_{uid}" if IS_WINDOWS else f"/tmp/streamix_host_{uid}.sock"
                 
                 admin_cfg = get_admin_config()
-                room_name = questionary.text("Room Name:", default=admin_cfg.get("default_room_name") or f"{os.getlogin()}'s Party", style=QSTYLE).ask()
+                room_name = questionary.text("Room Name:", default=admin_cfg.get("default_room_name") or f"{getpass.getuser()}'s Party", style=QSTYLE).ask()
                 host_name = questionary.text("Your Host Name:", default=admin_cfg.get("default_host_name") or "Host", style=QSTYLE).ask()
                 max_users = questionary.text("Max Users:", default="10", style=QSTYLE).ask()
                 
@@ -1721,4 +1684,4 @@ if __name__ == "__main__":
         console.print(f"\n\n[bold red]❌ CRITICAL ERROR:[/bold red] {e}")
         console.print("[dim]Backend has been safely shut down.[/dim]")
     finally:
-        stop_backend()
+        stop_backend(stop_party=False)

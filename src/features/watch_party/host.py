@@ -300,6 +300,10 @@ class PartyAdminTUI:
                         self.chat_history.append(
                             f"[bold red]System Error:[/bold red] {escape(msg)}"
                         )
+                    elif mt == "session_end":
+                        msg = data.get("message", "The session has ended.")
+                        self.chat_history.append(f"[bold yellow]{escape(msg)}[/bold yellow]")
+                        self.running = False
                         
                     # Keep history manageable
                     if len(self.chat_history) > 10000:
@@ -313,10 +317,15 @@ class PartyAdminTUI:
             self.chat_history.append("[bold yellow]This window will close automatically in 3 seconds...[/bold yellow]")
             self.running = False
         except Exception as e:
-            logger.error(f"System disconnected or error in message loop: {e}", exc_info=True)
+            msg = str(e).lower()
+            if (not self.running) or ("event loop is closed" in msg):
+                logger.info(f"Message loop closed during shutdown: {e}")
+            else:
+                logger.error(f"System disconnected or error in message loop: {e}", exc_info=True)
             self.chat_history.append(f"[bold red]System disconnected: {e}[/bold red]")
             self.running = False
         finally:
+            self.running = False
             if self.voice_manager:
                 self.voice_manager.stop()
 
@@ -771,14 +780,20 @@ if __name__ == "__main__":
     import signal
     import traceback
 
-    try:
-        # Handle SIGTERM from pkill so script exits cleanly
+    def _install_shutdown_handlers():
         def _handle_term(signum, frame):
             raise SystemExit(0)
+
         signal.signal(signal.SIGTERM, _handle_term)
+        signal.signal(signal.SIGINT, _handle_term)
+        if hasattr(signal, "SIGBREAK"):
+            signal.signal(signal.SIGBREAK, _handle_term)
         if hasattr(signal, "SIGHUP"):
             signal.signal(signal.SIGHUP, _handle_term)
-        
+
+    _install_shutdown_handlers()
+
+    try:
         host = sys.argv[1] if len(sys.argv) > 1 else "Host"
         ipc_path = sys.argv[2] if len(sys.argv) > 2 else None
         ws_url = sys.argv[3] if len(sys.argv) > 3 else "ws://localhost:9000"

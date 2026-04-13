@@ -66,7 +66,7 @@ class WatchPartyServer:
         self.hash_to_name = {} # Map hash_id -> name for history resolution
         self.chat_history = [] # Rolling list of recent messages
         self.last_logged_playback = {} # To throttle sync logs
-        
+
     def _save_to_history(self, msg_payload):
         """Standard method to save messages (chat or system) to history."""
         self.chat_history.append(msg_payload)

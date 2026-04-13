@@ -23,6 +23,7 @@ def setup_logger(name, filename, level=logging.INFO):
 
     logger = logging.getLogger(name)
     logger.setLevel(level)
+    logger.propagate = False
     
     # Avoid duplicate handlers if setup_logger is called multiple times on the same logger name
     if not logger.handlers:

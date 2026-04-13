@@ -394,6 +394,7 @@ class PartyClient:
             self.chat_history.append(f"[bold red]Failed to connect: {type(e).__name__}: {e}[/bold red]")
             self.running = False
         finally:
+            self.running = False
             if self.voice_manager:
                 self.voice_manager.stop()
 
@@ -760,15 +761,21 @@ if __name__ == "__main__":
     import sys
     import signal
     import traceback
-    
-    try:
-        # Handle SIGTERM from pkill so script exits cleanly
+
+    def _install_shutdown_handlers():
         def _handle_term(signum, frame):
             raise SystemExit(0)
+
         signal.signal(signal.SIGTERM, _handle_term)
+        signal.signal(signal.SIGINT, _handle_term)
+        if hasattr(signal, "SIGBREAK"):
+            signal.signal(signal.SIGBREAK, _handle_term)
         if hasattr(signal, "SIGHUP"):
             signal.signal(signal.SIGHUP, _handle_term)
-        
+
+    _install_shutdown_handlers()
+    
+    try:
         url = sys.argv[1] if len(sys.argv) > 1 else "ws://localhost:9000"
         username = sys.argv[2] if len(sys.argv) > 2 else f"Guest_{int(time.time())%1000}"
         
