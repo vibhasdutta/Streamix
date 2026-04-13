@@ -286,12 +286,20 @@ def _open_in_new_terminal(script_name, args, title="Streamix"):
     if current_os is OS.WINDOWS:
         # Windows: launch in a dedicated console to avoid fragile start/cmd quoting.
         args_cmd = subprocess.list2cmdline([str(a) for a in args]) if args else ""
-        command = f'cd /d "{project_root}" && {subprocess.list2cmdline([py, script])}'
+        
+        # Simplify: Set CWD in Popen directly to avoid nested quoting issues in cmd /k
+        # Use 'uv run' to ensure the correct environment is used.
+        command = f'uv run "{script}"'
         if args_cmd:
             command += f" {args_cmd}"
+        
         logger.info(f"[LIFECYCLE] Launching {script_name} in new Windows Terminal: {title}")
         create_new_console = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
-        proc = subprocess.Popen(["cmd", "/k", command], creationflags=create_new_console)
+        
+        # On Windows, passing the entire string to cmd /k wrapped in quotes is the robust way
+        # to handle inner quotes. CMD will strip the outer quotes and execute the rest.
+        full_cmd = f'cmd /k "{command}"'
+        proc = subprocess.Popen(full_cmd, creationflags=create_new_console, cwd=project_root)
 
     elif current_os is OS.MACOS:
         # macOS: open a new Terminal.app window via AppleScript
