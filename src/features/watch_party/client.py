@@ -73,6 +73,7 @@ class PartyClient:
         self._last_closed_notice_ts = 0.0
         self._last_failed_url = None
         self._last_failed_launch_ts = 0.0
+        self.current_playback_state = "closed"
 
     def _can_attempt_launch(self, url, cooldown=8.0):
         """Back off repeated launches for the same failing URL."""
@@ -289,6 +290,8 @@ class PartyClient:
                             timestamp = playback.get('timestamp', 0)
                             state = playback.get('state', 'paused')
                             provider = playback.get('provider')
+
+                            self.current_playback_state = state
                             
                             launched = self._launch_mpv(url, title, timestamp, provider=provider)
                             if launched:
@@ -377,6 +380,8 @@ class PartyClient:
                             state = playback.get("state", "playing")
                             provider = playback.get("provider")
 
+                            self.current_playback_state = state
+
                             # Cross-device clients cannot open host-local file paths.
                             # Keep party stable and show a helpful one-time hint.
                             if url and not is_network_media_url(url):
@@ -395,6 +400,7 @@ class PartyClient:
                                     except: pass
                                     self.mpv_process = None
                                 self.current_video_url = None
+                                self.current_playback_state = "closed"
                                 continue  # Skip the rest of the sync logic
                             
                             # Auto-launch or restart mpv when needed.
@@ -468,13 +474,19 @@ class PartyClient:
         except websockets.exceptions.ConnectionClosed as e:
             self.chat_history.append(f"[bold red]Connection lost: {e.reason if e.reason else 'Host ended the session'}[/bold red]")
             self.chat_history.append(f"[bold red]This terminal will close automatically in 3 seconds...[/bold red]")
+            self.current_video_url = None
+            self.current_playback_state = "closed"
             self.running = False
         except ConnectionRefusedError:
             self.chat_history.append("[bold red]Connection refused. The party server may not be running.[/bold red]")
+            self.current_video_url = None
+            self.current_playback_state = "closed"
             self.running = False
         except Exception as e:
             logger.error(f"Failed to connect or system error: {e}", exc_info=True)
             self.chat_history.append(f"[bold red]Failed to connect: {type(e).__name__}: {e}[/bold red]")
+            self.current_video_url = None
+            self.current_playback_state = "closed"
             self.running = False
         finally:
             self.running = False
@@ -599,7 +611,11 @@ class PartyClient:
                 self.chat_history.append(f"[green]Locally undeafened {target_name}. Audio restored.[/green]")
                 
         elif action == "/join":
-            if getattr(self, 'current_video_url', None) and getattr(self, 'mpv_process', None) is None:
+            if (
+                getattr(self, 'current_video_url', None)
+                and getattr(self, 'mpv_process', None) is None
+                and getattr(self, 'current_playback_state', 'closed') in ("playing", "paused")
+            ):
                 self.chat_history.append("[dim italic]Re-joining the video stream...[/dim italic]")
                 # Timestamp 0 will be fixed instantly on the next sync tick from the host
                 self._launch_mpv(self.current_video_url, "Party Video", 0)

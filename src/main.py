@@ -254,11 +254,23 @@ def _cleanup_party():
             PARTY_INFO_PATH.unlink()
     except:
         pass
+
+    try:
+        if PLAYBACK_STATE_PATH.exists():
+            PLAYBACK_STATE_PATH.unlink()
+    except:
+        pass
     
     # Remove party_info.json so the next host doesn't read stale data
     try:
         if PARTY_INFO_PATH.exists():
             PARTY_INFO_PATH.unlink()
+    except Exception:
+        pass
+
+    try:
+        if PLAYBACK_STATE_PATH.exists():
+            PLAYBACK_STATE_PATH.unlink()
     except Exception:
         pass
     

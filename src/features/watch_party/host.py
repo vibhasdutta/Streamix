@@ -82,7 +82,11 @@ class PartyAdminTUI:
         try:
             if PLAYBACK_STATE_PATH.exists():
                 with open(PLAYBACK_STATE_PATH, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    state = json.load(f)
+                updated_at = state.get("updated_at", 0)
+                if updated_at and (time.time() - float(updated_at)) > 600:
+                    return {}
+                return state
         except Exception:
             pass
         return {}
