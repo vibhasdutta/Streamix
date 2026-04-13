@@ -478,7 +478,7 @@ class WatchPartyServer:
             logger.error(f"Error handling client {client_name}: {e}")
             import traceback
             traceback.print_exc()
-            
+        finally:
             if websocket in self.clients:
                 del self.clients[websocket]
             if client_name and client_name in self.users:

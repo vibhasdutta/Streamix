@@ -1431,11 +1431,6 @@ def main():
     party_active = False
     is_host = True
     
-    # Session Persistence for recovery
-    current_session_url = None
-    current_session_host = None
-    current_session_user = None
-    curr_ipc_path = None
     party_proc = None
     ipc_server_path = None
 
@@ -1503,7 +1498,7 @@ def main():
                 if not party_url: continue
                 
                 import re
-                party_url = re.sub(r"\s+", "", party_url) # Strip ALL whitespace
+                party_url = re.sub(r"\s+", "", party_url)
                 if party_url.startswith("https://"): party_url = party_url.replace("https://", "wss://", 1)
                 elif party_url.startswith("http://"): party_url = party_url.replace("http://", "ws://", 1)
                 elif not party_url.startswith("ws://") and not party_url.startswith("wss://"): party_url = "wss://" + party_url
@@ -1513,18 +1508,11 @@ def main():
                 if not username: username = f"Guest_{int(time.time())%1000}"
                 else: update_client_config(default_username=username)
                 
-                console.print("[yellow]Connecting in new window...[/yellow]")
-                current_session_url = party_url
-                current_session_user = username
-                party_proc = _open_in_new_terminal("client.py", [party_url, username], title="Streamix Client")
-                if party_proc:
-                    active_subprocesses.append(party_proc)
-                    party_active = True
-                    is_host = False
-                    view = "dashboard"
-                else:
-                    console.print("[red]❌ Failed to launch client terminal.[/red]")
-                    time.sleep(2)
+                console.print("[yellow]Connecting... a new window will open for chat.[/yellow]")
+                _open_in_new_terminal("client.py", [party_url, username], title="Streamix Client")
+                console.print("[bold green]✅ Client window launched![/bold green]")
+                input("Press Enter to return to menu...")
+                view = "home"
                 continue
 
             if party_choice == "host":
@@ -1540,9 +1528,13 @@ def main():
                 if not room_name or not host_name or not max_users: continue
                 update_admin_config(default_room_name=room_name, default_host_name=host_name)
                 
+                console.print("[yellow]Starting party server and ngrok tunnel...[/yellow]")
+                
                 _cleanup_party()
                 time.sleep(0.5)
                 party_log = open(os.path.join(os.path.dirname(__file__), "data", "logs", "streamix_backend.log"), "a")
+                party_log.write(f"\n--- WATCH PARTY SERVER START: {time.ctime()} ---\n")
+                party_log.flush()
                 party_proc = subprocess.Popen([sys.executable, "party.py", room_name, host_name, max_users], stdout=party_log, stderr=party_log)
                 active_subprocesses.append(party_proc)
                 
@@ -1555,132 +1547,96 @@ def main():
                 if os.path.exists(party_info_path):
                     with open(party_info_path, "r") as f:
                         info = json.load(f)
-                        console.print(f"\n[bold green]✅ Party ready! URL copied to clipboard.[/bold green]")
+                        console.print(f"\n[bold green]✅ Party ready! Share this link with friends:[/bold green]")
                         console.print(Align.center(f"[bold yellow]{info['url']}[/bold yellow]"))
+                        
                         try:
-                            if IS_WINDOWS: subprocess.run(['clip'], input=info['url'].encode(), shell=True)
-                            elif IS_MACOS: subprocess.run(['pbcopy'], input=info['url'].encode())
+                            if IS_WINDOWS:
+                                subprocess.run(['clip'], input=info['url'].encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            elif IS_MACOS:
+                                subprocess.run(['pbcopy'], input=info['url'].encode())
+                            else:
+                                if shutil.which('xclip'):
+                                    subprocess.run(['xclip', '-selection', 'clipboard'], input=info['url'].encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            console.print(Align.center("[dim italic](Link automatically copied to your clipboard!)[/dim italic]"))
                         except: pass
                     
-                    # Run Host TUI inline in the current terminal window
-                    from host import PartyAdminTUI
-                    tui = PartyAdminTUI(username=host_name, ipc_path=ipc_server_path, ws_url=info['url'])
-                    asyncio.run(tui.run())
-                    current_session_url = info['url']
-                    current_session_host = host_name
-                    curr_ipc_path = ipc_server_path
+                    _open_in_new_terminal("host.py", [host_name, ipc_server_path or "", info['url']], title="Streamix Host")
+                    
+                    console.print("[dim]Admin console opened in a new window.[/dim]")
                     party_active = True
-                    view = "dashboard"
+                    is_host = True
                 else:
                     console.print("[red]❌ Failed to start party server. Check logs.[/red]")
                     if party_proc: party_proc.terminate()
                     time.sleep(2)
                     continue
+                
+                console.print("\n[bold cyan]Now pick what to watch! 🍿[/bold cyan]")
+                time.sleep(1.5)
+                view = "dashboard"
 
-        # ─── VIEW: DASHBOARD ───
+        # ─── VIEW: DASHBOARD (Main browsing loop) ───
         elif view == "dashboard":
-            # State management
+            if party_active and party_proc and party_proc.poll() is not None:
+                console.print("[yellow]Party session ended. Returning to home menu...[/yellow]")
+                _cleanup_party()
+                party_active = False
+                party_active_flag.clear()
+                time.sleep(1)
+                view = "home"
+                continue
+
             if party_active:
                 party_active_flag.set()
             else:
                 party_active_flag.clear()
 
             console.clear()
-            mode_label = "[green]🎉 Party[/green]" if party_active else "[cyan]🎬 Solo[/cyan]"
-            role_label = "[bold yellow]HOST[/bold yellow]" if is_host else "[bold blue]CLIENT[/bold blue]"
-            mpv_ok = "[green]✓[/green]" if get_mpv_path() else "[red]✗[/red]"
+            console.print()
             
+            mode_label = "[green]🎉 Party[/green]" if party_active else "[cyan]🎬 Solo[/cyan]"
+            mpv_ok = "[green]✓[/green]" if get_mpv_path() else "[red]✗[/red]"
             console.rule(f"[bold cyan]✨ {PROJECT_NAME} ✨[/bold cyan]", style="cyan")
-            console.print(Align.center(f"{mode_label} ({role_label})  [dim]|[/dim]  [dim]v{VERSION}[/dim]  [dim]|[/dim]  mpv {mpv_ok}"))
+            console.print(Align.center(f"{mode_label}  [dim]|[/dim]  [dim]v{VERSION}[/dim]  [dim]|[/dim]  mpv {mpv_ok}"))
+            console.print(Rule(style="dim cyan"))
             console.print()
 
-            if not is_host and party_active:
-                # --- CLIENT HUB ---
-                console.print(Align.center("[bold cyan]Connected to Watch Party![/bold cyan]"))
-                console.print(Align.center("[dim]The Host is managing the playback.[/dim]"))
-                console.print(Align.center("[dim]Use the Client terminal for chat & voice.[/dim]"))
-                console.print()
-                
-                choice = questionary.select(
-                    "Client Menu:",
-                    choices=[
-                        questionary.Choice("  🔄  Re-connect to Party", value="relaunch"),
-                        questionary.Choice("  💡  Help & Room Info", value="help"),
-                        questionary.Choice("  🎙️  Audio Settings", value="audio"),
-                        questionary.Separator(),
-                        questionary.Choice("  🚪  Leave Party", value="back"),
-                    ], 
-                    style=QSTYLE
-                ).ask()
-
-                if not choice or choice == "back":
-                    _cleanup_party(); party_active = False; party_active_flag.clear(); view = "home"; continue
-                if choice == "audio":
-                    handle_audio_peripherals(); continue
-            else:
-                # --- HOST / SOLO DASHBOARD ---
-                cache = load_cache()
-                dashboard_choices = [
-                    questionary.Choice("  🔍  Search Anime", value="search"),
-                    questionary.Choice("  🆕  New Releases", value="recent"),
-                    questionary.Choice("  🕒  Upcoming Anime", value="upcoming"),
-                    questionary.Choice("  🔥  Discover Trending", value="trending"),
-                    questionary.Choice("  📈  Top Popular", value="popular")
-                ]
-                if cache: dashboard_choices.append(questionary.Choice("  📜  Watch History", value="history"))
-                dashboard_choices.append(questionary.Choice("  ▶️  Custom Video", value="custom_play"))
-                
-                if party_active:
-                    dashboard_choices.append(questionary.Separator())
-                    dashboard_choices.append(questionary.Choice("  🔄  Re-open Admin Terminal", value="relaunch"))
-                    dashboard_choices.append(questionary.Choice("  💡  Help & Room Info", value="help"))
-                
-                dashboard_choices.append(questionary.Separator())
-                dashboard_choices.append(questionary.Choice("  🔙  Back", value="back"))
-                dashboard_choices.append(questionary.Choice("  🚪  Exit", value="exit"))
-                
-                choice = questionary.select(
-                    "Dashboard Menu:",
-                    choices=dashboard_choices,
-                    style=QSTYLE,
-                    instruction="(↑/↓ navigate)"
-                ).ask()
-                
-                if not choice or choice == "exit":
-                    console.print(Align.center("[bold magenta]さようなら! 👋✨[/bold magenta]"))
-                    return
-                
-                if choice == "back":
-                    _cleanup_party()
-                    party_active = False
-                    party_active_flag.clear()
-                    view = "home"
-                    continue
-                
-            # --- SHARED CHOICE HANDLERS ---
-            if choice == "relaunch":
-                if is_host:
-                    _open_in_new_terminal("host.py", [current_session_host, curr_ipc_path or ""], title="Streamix Host")
-                else:
-                    _open_in_new_terminal("client.py", [current_session_url, current_session_user], title="Streamix Client")
-                console.print("[green]Terminal launched![/green]")
-                time.sleep(1)
+            cache = load_cache()
+            
+            dashboard_choices = [
+                questionary.Choice("  🔍  Search Anime", value="search"),
+                questionary.Choice("  🆕  New Releases", value="recent"),
+                questionary.Choice("  ⏰  Upcoming Anime", value="upcoming"),
+                questionary.Choice("  🔥  Discover Trending", value="trending"),
+                questionary.Choice("  📈  Top Popular", value="popular")
+            ]
+            if cache:
+                dashboard_choices.append(questionary.Choice("  📜  Watch History", value="history"))
+            dashboard_choices.append(questionary.Choice("  ▶️  Custom Video", value="custom_play"))
+            
+            dashboard_choices.append(questionary.Separator())
+            dashboard_choices.append(questionary.Choice("  🔙  Back", value="back"))
+            dashboard_choices.append(questionary.Choice("  🚪  Exit", value="exit"))
+            
+            choice = questionary.select(
+                "What would you like to do?",
+                choices=dashboard_choices,
+                style=QSTYLE,
+                instruction="(↑/↓ navigate)"
+            ).ask()
+            
+            if not choice or choice == "exit":
+                console.print(Align.center("[bold magenta]さようなら! 👋✨[/bold magenta]"))
+                return
+            
+            if choice == "back":
+                _cleanup_party()
+                party_active = False
+                party_active_flag.clear()
+                view = "home"
                 continue
 
-            if choice == "help":
-                console.clear()
-                console.rule("[bold yellow]💡 SESSION HELP & INFO[/bold yellow]")
-                console.print(f"\n[cyan]Room URL:[/cyan] [bold]{current_session_url}[/bold]")
-                console.print("\n[bold]Administrative Commands:[/bold] (Type in terminal)")
-                console.print(" • [magenta]/kick [Name/ID][/magenta] - Remove a user")
-                console.print(" • [magenta]/ban  [Name/ID][/magenta] - Permanent ban")
-                console.print(" • [magenta]/mute [Name/ID][/magenta] - Silence user globally")
-                console.print(" • [magenta]/users[/magenta] - List all current users")
-                console.print("\n[dim]You can target users by typing their Name OR their ID (e.g. #A1B2C3).[/dim]")
-                questionary.press_any_key_to_continue("[yellow]Press any key to return...[/yellow]").ask()
-                continue
-
-            # --- CHOICE HANDLERS (Dashboard) ---
             if choice == 'custom_play':
                 console.clear()
                 console.rule("[bold cyan]▶️ CUSTOM VIDEO PLAYBACK[/bold cyan]", style="dim cyan")
@@ -1807,7 +1763,6 @@ if __name__ == "__main__":
     
     def _signal_cleanup(signum, frame):
         """Handle SIGTERM/SIGINT for clean shutdown."""
-        # Just raise KeyboardInterrupt to let the try/finally handle it
         raise KeyboardInterrupt
     
     signal.signal(signal.SIGTERM, _signal_cleanup)

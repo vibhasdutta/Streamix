@@ -761,6 +761,8 @@ if __name__ == "__main__":
         def _handle_term(signum, frame):
             raise SystemExit(0)
         signal.signal(signal.SIGTERM, _handle_term)
+        if hasattr(signal, "SIGHUP"):
+            signal.signal(signal.SIGHUP, _handle_term)
         
         url = sys.argv[1] if len(sys.argv) > 1 else "ws://localhost:9000"
         username = sys.argv[2] if len(sys.argv) > 2 else f"Guest_{int(time.time())%1000}"
