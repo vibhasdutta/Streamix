@@ -1,14 +1,24 @@
+import asyncio
 import requests
 import os
 import json
 import time
 import sys
 import subprocess
+import threading
+import signal
 import atexit
 import shutil
 import platform
 import hashlib
 from pathlib import Path
+from config import (
+    load_config, 
+    update_admin_config, 
+    update_client_config,
+    get_admin_config,
+    get_client_config
+)
 from rich.console import Console
 from rich.table import Table
 from rich.prompt import Prompt
@@ -32,6 +42,10 @@ from utils.os_detector import (
     RAW_OS_VERSION,
     current_os,
 )
+from utils.logger import setup_logger
+
+# Initialize centralized lifecycle logger
+logger = setup_logger("main_hub", "streamix_backend.log")
 
 API_BASE = "http://localhost:8000"
 JSON_DIR = Path("data")
@@ -46,6 +60,8 @@ party_proc = None
 active_subprocesses = []
 VERSION = "1.0.0"
 PROJECT_NAME = "STREAMIX"
+# Flags to tell monitor when we are actually in a party session
+party_active_flag = threading.Event()
 
 # ── Premium Questionary Theme ──
 QSTYLE = QStyle([
@@ -116,34 +132,49 @@ def status_after(text, center=False):
     with Live(display, transient=True, refresh_per_second=10):
         yield
 
+_is_cleaning_up = False
 def stop_backend():
     """Full cleanup of ALL Streamix processes: backend, party server, ngrok, Terminal windows, IPC sockets."""
+    global _is_cleaning_up
+    if _is_cleaning_up:
+        return
+    _is_cleaning_up = True
+    
     global backend_process
     if backend_process:
         try:
             if backend_process.poll() is None:
                 console.print(f"[dim]Stopping {PROJECT_NAME} backend[/dim]")
+                logger.info(f"[LIFECYCLE] Stopping backend process (PID: {backend_process.pid})")
                 backend_process.terminate()
                 backend_process.wait(timeout=3)
         except:
             if backend_process:
-                try: backend_process.kill()
+                try: 
+                    logger.warning(f"[LIFECYCLE] Force-killing backend process (PID: {backend_process.pid})")
+                    backend_process.kill()
                 except: pass
         finally:
             backend_process = None
+            # Explicitly flush logs before exit
+            for handler in logger.handlers:
+                handler.flush()
             
     global active_subprocesses
     for proc in active_subprocesses:
         try:
             if proc.poll() is None:
+                logger.info(f"[LIFECYCLE] Terminating subprocess (PID: {proc.pid})")
                 proc.terminate()
                 proc.wait(timeout=2)
         except Exception:
             try:
+                logger.warning(f"[LIFECYCLE] Force-killing subprocess (PID: {proc.pid})")
                 proc.kill()
             except:
                 pass
     active_subprocesses.clear()
+    logger.info("[LIFECYCLE] System cleanup completed.")
             
     # Kill party Python processes and ngrok
     try:
@@ -206,17 +237,36 @@ def stop_backend():
 
 def _cleanup_party():
     """Kill all party-related processes (server, ngrok, admin/client terminals) without touching the backend."""
-    # Kill party scripts
+    global active_subprocesses
+    
+    # 1. Kill tracked subprocesses first (Safest way)
+    for proc in active_subprocesses:
+        try:
+            if proc.poll() is None:
+                logger.info(f"[LIFECYCLE] Terminating session subprocess (PID: {proc.pid})")
+                proc.terminate()
+                try: proc.wait(timeout=1.5)
+                except subprocess.TimeoutExpired: proc.kill()
+        except: pass
+    active_subprocesses.clear()
+
+    # 2. Force-kill known external dependencies (ngrok)
     try:
         if IS_WINDOWS:
-            os.system("taskkill /F /IM ngrok.exe /T >nul 2>&1")
+            # Only kill ngrok on windows as a fallback
+            subprocess.run(["taskkill", "/F", "/IM", "ngrok.exe", "/T"], 
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:
-            os.system("pkill -f host.py >/dev/null 2>&1")
-            os.system("pkill -f client.py >/dev/null 2>&1")
-            os.system("pkill -f party.py >/dev/null 2>&1")
             os.system("pkill -9 ngrok >/dev/null 2>&1")
-    except Exception:
+    except:
         pass
+    
+    # 3. Cleanup state files
+    try:
+        party_info = os.path.join(os.path.dirname(__file__), "data", "party_info.json")
+        if os.path.exists(party_info):
+            os.remove(party_info)
+    except: pass
     
     # Close leftover Terminal windows on macOS
     if IS_MACOS:
@@ -243,7 +293,6 @@ def _cleanup_party():
     
     # Remove party_info.json so the next host doesn't read stale data
     try:
-        party_info = os.path.join(os.path.dirname(__file__), "data", "party_info.json")
         if os.path.exists(party_info):
             os.remove(party_info)
     except Exception:
@@ -260,7 +309,6 @@ def _cleanup_party():
             pass
     
     # Remove dead party procs from active_subprocesses
-    global active_subprocesses
     active_subprocesses = [p for p in active_subprocesses if p.poll() is None]
 
 def _open_in_new_terminal(script_name, args, title="Streamix"):
@@ -274,6 +322,7 @@ def _open_in_new_terminal(script_name, args, title="Streamix"):
         # Windows: open a new cmd window
         args_str = ' '.join(f'\"{a}\"' for a in args)
         cmd = f'start "{title}" cmd /c "\"{py}\" \"{script}\" {args_str}"'
+        logger.info(f"[LIFECYCLE] Launching {script_name} in new Windows Terminal: {title}")
         proc = subprocess.Popen(cmd, shell=True)
 
     elif current_os is OS.MACOS:
@@ -351,6 +400,7 @@ def start_backend():
                 stdout=log_file,
                 stderr=log_file
             )
+            logger.info(f"[LIFECYCLE] Backend server started successfully (PID: {backend_process.pid})")
             atexit.register(stop_backend)
             
             # Wait for backend to be ready
@@ -494,6 +544,7 @@ def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=Fal
         try:
             if ipc_server and party_proc:
                 mpv_process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                logger.info(f"[LIFECYCLE] Solo Player launched (PID: {mpv_process.pid}) for URL: {url}")
                 import threading
                 def _party_watchdog():
                     while mpv_process.poll() is None:
@@ -510,6 +561,7 @@ def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=Fal
             else:
                 # Solo mode: Capture stdout to precisely track the exit position
                 mpv_process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding="utf-8")
+                logger.info(f"[LIFECYCLE] Party Player launched (PID: {mpv_process.pid}) for URL: {url}")
                 
                 last_pos = 0.0
                 duration = 0.0
@@ -923,6 +975,93 @@ def display_anime_details(selected_anime):
     
     return "back", None
 
+def handle_audio_peripherals():
+    """Menu to select and test microphone and headphones."""
+    from voice_manager import VoiceManager
+    import sounddevice as sd
+    from config import update_admin_config, update_client_config, load_config
+    
+    while True:
+        cfg = load_config()
+        # Use admin config as source of truth for setup (it syncs to client anyway)
+        mic_idx = cfg["admin"].get("mic_device_index")
+        
+        # Get actual names if possible
+        devices = sd.query_devices()
+        mic_name = "Default"
+        if mic_idx is not None and mic_idx < len(devices):
+            mic_name = devices[mic_idx]['name']
+
+        console.clear()
+        console.rule("[bold magenta]🎙️ AUDIO PERIPHERALS[/bold magenta]", style="dim magenta")
+        console.print(f"\n[cyan]Microphone:[/cyan]  {mic_name}")
+        console.print("\n[dim]Anime and Voice Chat will follow your Windows default output.[/dim]")
+        console.print()
+        
+        choice = questionary.select(
+            "Peripherals Menu:",
+            choices=[
+                "Change Microphone",
+                "Test Microphone (Live Bar)",
+                "Hear a Test Sound (Headphones)",
+                questionary.Separator(),
+                "Save & Back"
+            ],
+            style=QSTYLE
+        ).ask()
+        
+        if choice == "Save & Back" or choice is None:
+            break
+            
+        if choice == "Change Microphone":
+            mics = VoiceManager.get_devices(kind='input')
+            mic_choices = [questionary.Choice(f" {m['index']}: {m['name']}", value=m['index']) for m in mics]
+            mic_choices.insert(0, questionary.Choice("  🔙  Back", value="back"))
+            mic_choices.insert(1, questionary.Choice("Default System Device", value=None))
+            
+            new_mic = questionary.select("Select Microphone:", choices=mic_choices, style=QSTYLE).ask()
+            if new_mic != "back":
+                update_admin_config(mic_device_index=new_mic)
+                update_client_config(mic_device_index=new_mic)
+            
+        elif choice == "Test Microphone (Live Bar)":
+            console.print("[yellow]Mic Test active for 10 seconds. Speak now![/yellow]")
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            vm = VoiceManager(loop, input_device=mic_idx)
+            vm.mic_muted = False
+            vm.start()
+            
+            from rich.live import Live
+            from rich.panel import Panel
+            
+            def make_bar():
+                vol = vm.current_volume
+                bar_len = int(vol * 40)
+                bar = "█" * bar_len + " " * (40 - bar_len)
+                color = "green" if vol < 0.6 else ("yellow" if vol < 0.8 else "red")
+                return Panel(f"[{color}]{bar}[/{color}]", title="Mic Input Level", width=50)
+
+            with Live(make_bar(), refresh_per_second=20) as live:
+                for _ in range(200): # ~10 seconds
+                    live.update(make_bar())
+                    time.sleep(0.05)
+            vm.stop()
+
+        elif choice == "Hear a Test Sound (Headphones)":
+            console.print("[yellow]Playing test tone...[/yellow]")
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            # Use output_device=None to play through Windows Default
+            vm = VoiceManager(loop, output_device=None)
+            vm.play_test_sound()
+
 def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None, ipc_server_path=None):
     with status_after(f"[yellow]🔍 Fetching providers for {t_str}[/yellow]"):
         try:
@@ -1283,514 +1422,393 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None,
 def main():
     start_backend()
     
+    # Persistent state across views
     search_history = []
+    view = "home" # "home", "party", "dashboard"
     
-    # ── Mode Selection ──
-    # console.clear() # Preserving the banner from start_backend
-    
-    mode = questionary.select(
-        "How do you want to watch?",
-        choices=[
-            questionary.Choice("  🎬  Solo (Watch Alone)", value="solo"),
-            questionary.Choice("  🎉  Party (Watch Together)", value="party"),
-            questionary.Separator(),
-            questionary.Choice("  🚪  Exit", value="exit"),
-        ],
-        style=QSTYLE,
-        instruction="(↑/↓ navigate)"
-    ).ask()
-    
-    if mode is None or mode == "exit":
-        console.print(Align.center("[bold magenta]Goodbye! 🎉[/bold magenta]"))
-        return
-    
-    # ── Party sub-menu ──
+    # Session state
     global party_proc
     party_active = False
+    is_host = True
+    
+    # Session Persistence for recovery
+    current_session_url = None
+    current_session_host = None
+    current_session_user = None
+    curr_ipc_path = None
     party_proc = None
     ipc_server_path = None
-    
-    if mode == "party":
-        console.clear()
-        console.rule("[bold cyan]🎉 WATCH PARTY MODE[/bold cyan]", style="dim cyan")
-        console.print()
-        
-        party_choice = questionary.select(
-            "What would you like to do?",
-            choices=[
-                questionary.Choice("  📡  Host a Party", value="host"),
-                questionary.Choice("  🔗  Join a Party", value="join"),
-                questionary.Separator(),
-                questionary.Choice("  🔙  Back", value="back"),
-            ],
-            style=QSTYLE,
-        ).ask()
-        
-        if party_choice is None or party_choice == "back":
-            return main()  # Restart
-        
-        if party_choice == "join":
-            console.clear()
-            console.rule("[bold cyan]🔗 JOIN WATCH PARTY[/bold cyan]", style="dim cyan")
-            console.print()
-            party_url = questionary.text("Enter Party Link (wss://... or ws://...):", style=QSTYLE).ask()
-            if not party_url:
-                return
-            # Normalize URL: accept any format the user pastes
-            party_url = party_url.strip()
-            if party_url.startswith("https://"):
-                party_url = party_url.replace("https://", "wss://", 1)
-            elif party_url.startswith("http://"):
-                party_url = party_url.replace("http://", "ws://", 1)
-            elif not party_url.startswith("ws://") and not party_url.startswith("wss://"):
-                party_url = "wss://" + party_url
-            
-            username = questionary.text("Enter Your Name:", style=QSTYLE).ask()
-            if not username:
-                username = f"Guest_{int(time.time())%1000}"
-            
-            console.print("[yellow]Connecting... a new window will open for chat.[/yellow]")
-            _open_in_new_terminal("client.py", [party_url, username], title="Streamix Client")
-            console.print("[bold green]✅ Client window launched![/bold green]")
-            input("Press Enter to return to menu...")
-            return main()
-        
-        if party_choice == "host":
-            import uuid
-            uid = str(uuid.uuid4())[:8]
-            ipc_server_path = fr"\\.\pipe\streamix_host_{uid}" if IS_WINDOWS else f"/tmp/streamix_host_{uid}.sock"
-            
-            room_name = questionary.text("Room Name:", default=f"{os.getlogin()}'s Party", style=QSTYLE).ask()
-            host_name = questionary.text("Your Host Name:", default="Host", style=QSTYLE).ask()
-            
-            if not room_name or not host_name:
-                return
-            
-            console.print("[yellow]Starting party server and ngrok tunnel...[/yellow]")
-            
-            # Clean up any leftover party processes from a previous session
-            _cleanup_party()
-            time.sleep(0.5)  # Give port 9000 time to be released
-            party_log_file = open(os.path.join(os.path.dirname(__file__), "data", "logs", "streamix_backend.log"), "a")
-            party_log_file.write(f"\n--- WATCH PARTY SERVER START: {time.ctime()} ---\n")
-            party_log_file.flush()
-            party_proc = subprocess.Popen(
-                [sys.executable, "party.py", room_name, host_name],
-                stdout=party_log_file,
-                stderr=party_log_file
-            )
-            active_subprocesses.append(party_proc)
-            
-            party_info_path = os.path.join(os.path.dirname(__file__), "data", "party_info.json")
-            for _ in range(20):
-                if os.path.exists(party_info_path):
-                    break
-                time.sleep(0.5)
-                
-            if os.path.exists(party_info_path):
-                with open(party_info_path, "r") as f:
-                    info = json.load(f)
-                    console.print(f"\n[bold green]✅ Party ready! Share this link with friends:[/bold green]")
-                    console.print(Align.center(f"[bold yellow]{info['url']}[/bold yellow]"))
-                    
-                    # Auto-copy URL to clipboard based on OS natively
-                    try:
-                        if IS_WINDOWS:
-                            subprocess.run(['clip'], input=info['url'].encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        elif IS_MACOS:
-                            subprocess.run(['pbcopy'], input=info['url'].encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        else:
-                            import shutil
-                            if shutil.which('xclip'):
-                                subprocess.run(['xclip', '-selection', 'clipboard'], input=info['url'].encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                            elif shutil.which('Wayland'):
-                                subprocess.run(['wl-copy'], input=info['url'].encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        console.print(Align.center("[dim italic](Link automatically copied to your clipboard!)[/dim italic]"))
-                    except BaseException:
-                        pass
-                
-                _open_in_new_terminal("host.py", [host_name, ipc_server_path or ""], title="Streamix Host")
-                
-                console.print("[dim]Admin console opened in a new window.[/dim]")
-                party_active = True
-            else:
-                console.print("[red]❌ Failed to start party server. Continuing in solo mode.[/red]")
-                if party_proc:
-                    party_proc.terminate()
-                    party_proc = None
-            
-            console.print("\n[bold cyan]Now pick what to watch! 🍿[/bold cyan]")
-            time.sleep(1.5)
-    
-    # ── Main Loop (shared by Solo and Party Host) ──
-    while True:
-        if party_active and party_proc and party_proc.poll() is not None:
-            console.print("[yellow]Party session ended. Returning to home menu...[/yellow]")
-            time.sleep(1)
-            return main()
 
-        console.clear()
-        console.print()
-        
-        # ── Dashboard Header ──
-        mode_label = "[green]🎉 Party[/green]" if party_active else "[cyan]🎬 Solo[/cyan]"
-        mpv_ok = "[green]✓[/green]" if get_mpv_path() else "[red]✗[/red]"
-        console.rule(f"[bold cyan]✨ {PROJECT_NAME} ✨[/bold cyan]", style="cyan")
-        console.print(Align.center(f"{mode_label}  [dim]|[/dim]  [dim]v{VERSION}[/dim]  [dim]|[/dim]  mpv {mpv_ok}"))
-        console.print(Rule(style="dim cyan"))
-        console.print()
-        
-        cache = load_cache()
-        
-        menu_choices = [
-            questionary.Choice("  🔍  Search Anime", value="search"),
-            questionary.Choice("  🆕  New Releases", value="recent"),
-            questionary.Choice("  ⏰  Upcoming Anime", value="upcoming"),
-            questionary.Choice("  🔥  Discover Trending", value="trending"),
-            questionary.Choice("  🏆  Top Popular", value="popular")
-        ]
-        if cache:
-            menu_choices.append(questionary.Choice("  📚  Watch History", value="history"))
-            
-        menu_choices.append(questionary.Choice("  ▶️  Custom Video (Local/URL)", value="custom_play"))
-        
-        menu_choices.append(questionary.Separator())
-        menu_choices.append(questionary.Choice("  🔙  Back", value="back"))
-        menu_choices.append(questionary.Choice("  🚪  Exit", value="exit"))
-        
-        choice = questionary.select(
-            "What would you like to do?",
-            choices=menu_choices,
-            style=QSTYLE,
-            instruction="(↑/↓ navigate)"
-        ).ask()
-        
-        if choice is None or choice == "exit":
-            console.print(Align.center("[bold magenta]Goodbye! 🎉[/bold magenta]"))
-            break
-        
-        if choice == "back":
-            _cleanup_party()
-            return main()
-            
-        elif choice == 'custom_play':
+    while True:
+        # ─── VIEW: HOME ───
+        if view == "home":
             console.clear()
-            console.rule("[bold cyan]▶️ CUSTOM VIDEO PLAYBACK[/bold cyan]", style="dim cyan")
+            console.rule(f"[bold cyan]✨ {PROJECT_NAME} ✨[/bold cyan]", style="cyan")
+            console.print(Align.center(f"[dim]v{VERSION}  |  Choose Your Playback Mode[/dim]"))
             console.print()
-            console.print("[dim]Supported: Local files, HTTP Links, YouTube URLs (yt-dlp is installed for mpv)[/dim]\n")
-            
-            sub_choice = questionary.select(
-                "Choose playback source:",
+
+            mode = questionary.select(
+                "How do you want to watch?",
                 choices=[
-                    questionary.Choice("  📁  Select Local File", value="local"),
-                    questionary.Choice("  🔗  Paste Link", value="link"),
-                    questionary.Choice("  📡  Live Stream (Low Latency)", value="live"),
+                    questionary.Choice("  🎬  Solo (Watch Alone)", value="solo"),
+                    questionary.Choice("  🎉  Party (Watch Together)", value="party"),
                     questionary.Separator(),
-                    questionary.Choice("  🔙  Back", value="back")
+                    questionary.Choice("  🚪  Exit", value="exit"),
+                ],
+                style=QSTYLE,
+                instruction="(↑/↓ navigate)"
+            ).ask()
+            
+            if mode is None or mode == "exit":
+                console.print(Align.center("[bold magenta]さようなら! 👋✨[/bold magenta]"))
+                return
+            
+            if mode == "solo":
+                party_active = False
+                view = "dashboard"
+            elif mode == "party":
+                view = "party"
+
+        # ─── VIEW: PARTY SETUP ───
+        elif view == "party":
+            console.clear()
+            console.rule("[bold cyan]🎉 WATCH PARTY MODE[/bold cyan]", style="dim cyan")
+            console.print()
+            
+            party_choice = questionary.select(
+                "Watch Party Menu:",
+                choices=[
+                    questionary.Choice("  📡  Host a Party", value="host"),
+                    questionary.Choice("  🔗  Join a Party", value="join"),
+                    questionary.Choice("  🎙️  Audio Settings", value="audio"),
+                    questionary.Separator(),
+                    questionary.Choice("  🔙  Back", value="back"),
                 ],
                 style=QSTYLE,
             ).ask()
             
-            if not sub_choice or sub_choice == "back":
+            if party_choice is None or party_choice == "back":
+                view = "home"
                 continue
+            
+            if party_choice == "audio":
+                handle_audio_peripherals()
+                continue
+
+            if party_choice == "join":
+                console.clear()
+                console.rule("[bold cyan]🔗 JOIN WATCH PARTY[/bold cyan]", style="dim cyan")
+                console.print()
+                party_url = questionary.text("Enter Party Link (wss://...):", style=QSTYLE).ask()
+                if not party_url: continue
                 
-            is_live_stream = (sub_choice == "live")
+                import re
+                party_url = re.sub(r"\s+", "", party_url) # Strip ALL whitespace
+                if party_url.startswith("https://"): party_url = party_url.replace("https://", "wss://", 1)
+                elif party_url.startswith("http://"): party_url = party_url.replace("http://", "ws://", 1)
+                elif not party_url.startswith("ws://") and not party_url.startswith("wss://"): party_url = "wss://" + party_url
                 
-            if sub_choice == "local":
-                if IS_MACOS:
-                    try:
-                        result = subprocess.run(
-                            ['osascript', '-e', 'POSIX path of (choose file with prompt "Select Video File")'],
-                            capture_output=True, text=True
-                        )
-                        custom_path = result.stdout.strip()
-                    except Exception:
-                        custom_path = ""
+                client_cfg = get_client_config()
+                username = questionary.text("Enter Your Name:", default=client_cfg.get("default_username", ""), style=QSTYLE).ask()
+                if not username: username = f"Guest_{int(time.time())%1000}"
+                else: update_client_config(default_username=username)
+                
+                console.print("[yellow]Connecting in new window...[/yellow]")
+                current_session_url = party_url
+                current_session_user = username
+                party_proc = _open_in_new_terminal("client.py", [party_url, username], title="Streamix Client")
+                if party_proc:
+                    active_subprocesses.append(party_proc)
+                    party_active = True
+                    is_host = False
+                    view = "dashboard"
                 else:
+                    console.print("[red]❌ Failed to launch client terminal.[/red]")
+                    time.sleep(2)
+                continue
+
+            if party_choice == "host":
+                import uuid
+                uid = str(uuid.uuid4())[:8]
+                ipc_server_path = fr"\\.\pipe\streamix_host_{uid}" if IS_WINDOWS else f"/tmp/streamix_host_{uid}.sock"
+                
+                admin_cfg = get_admin_config()
+                room_name = questionary.text("Room Name:", default=admin_cfg.get("default_room_name") or f"{os.getlogin()}'s Party", style=QSTYLE).ask()
+                host_name = questionary.text("Your Host Name:", default=admin_cfg.get("default_host_name") or "Host", style=QSTYLE).ask()
+                max_users = questionary.text("Max Users:", default="10", style=QSTYLE).ask()
+                
+                if not room_name or not host_name or not max_users: continue
+                update_admin_config(default_room_name=room_name, default_host_name=host_name)
+                
+                _cleanup_party()
+                time.sleep(0.5)
+                party_log = open(os.path.join(os.path.dirname(__file__), "data", "logs", "streamix_backend.log"), "a")
+                party_proc = subprocess.Popen([sys.executable, "party.py", room_name, host_name, max_users], stdout=party_log, stderr=party_log)
+                active_subprocesses.append(party_proc)
+                
+                party_info_path = os.path.join(os.path.dirname(__file__), "data", "party_info.json")
+                with status_after("[yellow]📡 Starting Party Server...[/yellow]", center=True):
+                    for _ in range(25):
+                        if os.path.exists(party_info_path): break
+                        time.sleep(0.5)
+                
+                if os.path.exists(party_info_path):
+                    with open(party_info_path, "r") as f:
+                        info = json.load(f)
+                        console.print(f"\n[bold green]✅ Party ready! URL copied to clipboard.[/bold green]")
+                        console.print(Align.center(f"[bold yellow]{info['url']}[/bold yellow]"))
+                        try:
+                            if IS_WINDOWS: subprocess.run(['clip'], input=info['url'].encode(), shell=True)
+                            elif IS_MACOS: subprocess.run(['pbcopy'], input=info['url'].encode())
+                        except: pass
+                    
+                    # Run Host TUI inline in the current terminal window
+                    from host import PartyAdminTUI
+                    tui = PartyAdminTUI(username=host_name, ipc_path=ipc_server_path, ws_url=info['url'])
+                    asyncio.run(tui.run())
+                    current_session_url = info['url']
+                    current_session_host = host_name
+                    curr_ipc_path = ipc_server_path
+                    party_active = True
+                    view = "dashboard"
+                else:
+                    console.print("[red]❌ Failed to start party server. Check logs.[/red]")
+                    if party_proc: party_proc.terminate()
+                    time.sleep(2)
+                    continue
+
+        # ─── VIEW: DASHBOARD ───
+        elif view == "dashboard":
+            # State management
+            if party_active:
+                party_active_flag.set()
+            else:
+                party_active_flag.clear()
+
+            console.clear()
+            mode_label = "[green]🎉 Party[/green]" if party_active else "[cyan]🎬 Solo[/cyan]"
+            role_label = "[bold yellow]HOST[/bold yellow]" if is_host else "[bold blue]CLIENT[/bold blue]"
+            mpv_ok = "[green]✓[/green]" if get_mpv_path() else "[red]✗[/red]"
+            
+            console.rule(f"[bold cyan]✨ {PROJECT_NAME} ✨[/bold cyan]", style="cyan")
+            console.print(Align.center(f"{mode_label} ({role_label})  [dim]|[/dim]  [dim]v{VERSION}[/dim]  [dim]|[/dim]  mpv {mpv_ok}"))
+            console.print()
+
+            if not is_host and party_active:
+                # --- CLIENT HUB ---
+                console.print(Align.center("[bold cyan]Connected to Watch Party![/bold cyan]"))
+                console.print(Align.center("[dim]The Host is managing the playback.[/dim]"))
+                console.print(Align.center("[dim]Use the Client terminal for chat & voice.[/dim]"))
+                console.print()
+                
+                choice = questionary.select(
+                    "Client Menu:",
+                    choices=[
+                        questionary.Choice("  🔄  Re-connect to Party", value="relaunch"),
+                        questionary.Choice("  💡  Help & Room Info", value="help"),
+                        questionary.Choice("  🎙️  Audio Settings", value="audio"),
+                        questionary.Separator(),
+                        questionary.Choice("  🚪  Leave Party", value="back"),
+                    ], 
+                    style=QSTYLE
+                ).ask()
+
+                if not choice or choice == "back":
+                    _cleanup_party(); party_active = False; party_active_flag.clear(); view = "home"; continue
+                if choice == "audio":
+                    handle_audio_peripherals(); continue
+            else:
+                # --- HOST / SOLO DASHBOARD ---
+                cache = load_cache()
+                dashboard_choices = [
+                    questionary.Choice("  🔍  Search Anime", value="search"),
+                    questionary.Choice("  🆕  New Releases", value="recent"),
+                    questionary.Choice("  🕒  Upcoming Anime", value="upcoming"),
+                    questionary.Choice("  🔥  Discover Trending", value="trending"),
+                    questionary.Choice("  📈  Top Popular", value="popular")
+                ]
+                if cache: dashboard_choices.append(questionary.Choice("  📜  Watch History", value="history"))
+                dashboard_choices.append(questionary.Choice("  ▶️  Custom Video", value="custom_play"))
+                
+                if party_active:
+                    dashboard_choices.append(questionary.Separator())
+                    dashboard_choices.append(questionary.Choice("  🔄  Re-open Admin Terminal", value="relaunch"))
+                    dashboard_choices.append(questionary.Choice("  💡  Help & Room Info", value="help"))
+                
+                dashboard_choices.append(questionary.Separator())
+                dashboard_choices.append(questionary.Choice("  🔙  Back", value="back"))
+                dashboard_choices.append(questionary.Choice("  🚪  Exit", value="exit"))
+                
+                choice = questionary.select(
+                    "Dashboard Menu:",
+                    choices=dashboard_choices,
+                    style=QSTYLE,
+                    instruction="(↑/↓ navigate)"
+                ).ask()
+                
+                if not choice or choice == "exit":
+                    console.print(Align.center("[bold magenta]さようなら! 👋✨[/bold magenta]"))
+                    return
+                
+                if choice == "back":
+                    _cleanup_party()
+                    party_active = False
+                    party_active_flag.clear()
+                    view = "home"
+                    continue
+                
+            # --- SHARED CHOICE HANDLERS ---
+            if choice == "relaunch":
+                if is_host:
+                    _open_in_new_terminal("host.py", [current_session_host, curr_ipc_path or ""], title="Streamix Host")
+                else:
+                    _open_in_new_terminal("client.py", [current_session_url, current_session_user], title="Streamix Client")
+                console.print("[green]Terminal launched![/green]")
+                time.sleep(1)
+                continue
+
+            if choice == "help":
+                console.clear()
+                console.rule("[bold yellow]💡 SESSION HELP & INFO[/bold yellow]")
+                console.print(f"\n[cyan]Room URL:[/cyan] [bold]{current_session_url}[/bold]")
+                console.print("\n[bold]Administrative Commands:[/bold] (Type in terminal)")
+                console.print(" • [magenta]/kick [Name/ID][/magenta] - Remove a user")
+                console.print(" • [magenta]/ban  [Name/ID][/magenta] - Permanent ban")
+                console.print(" • [magenta]/mute [Name/ID][/magenta] - Silence user globally")
+                console.print(" • [magenta]/users[/magenta] - List all current users")
+                console.print("\n[dim]You can target users by typing their Name OR their ID (e.g. #A1B2C3).[/dim]")
+                questionary.press_any_key_to_continue("[yellow]Press any key to return...[/yellow]").ask()
+                continue
+
+            # --- CHOICE HANDLERS (Dashboard) ---
+            if choice == 'custom_play':
+                console.clear()
+                console.rule("[bold cyan]▶️ CUSTOM VIDEO PLAYBACK[/bold cyan]", style="dim cyan")
+                console.print()
+                sub_choice = questionary.select(
+                    "Source Type:",
+                    choices=[
+                        questionary.Choice("  📁  Local File", value="local"),
+                        questionary.Choice("  🔗  Video Link / URL", value="link"),
+                        questionary.Choice("  📡  Live Stream (Low Latency)", value="live"),
+                        questionary.Separator(),
+                        questionary.Choice("  🔙  Back", value="back")
+                    ], style=QSTYLE
+                ).ask()
+                
+                if not sub_choice or sub_choice == "back": continue
+                    
+                is_live = (sub_choice == "live")
+                if sub_choice == "local":
                     import tkinter as tk
                     from tkinter import filedialog
-                    
-                    root = tk.Tk()
-                    root.attributes("-topmost", True)
-                    root.withdraw()
-                    
-                    custom_path = filedialog.askopenfilename(
-                        title="Select Video File",
-                        filetypes=[("Video Files", "*.mp4 *.mkv *.avi *.webm *.mov"), ("All Files", "*.*")]
-                    )
+                    root = tk.Tk(); root.attributes("-topmost", True); root.withdraw()
+                    c_path = filedialog.askopenfilename(title="Select Video File")
                     root.destroy()
-                
-                if not custom_path:
-                    continue
-            else:
-                prompt_text = "Enter live stream URL (leave blank to go back):" if is_live_stream else "Enter video URL (leave blank to go back):"
-                custom_path = questionary.text(prompt_text, style=QSTYLE).ask()
-                if not custom_path:
-                    continue
-                
-            clean_path = custom_path.strip("\"'")
-            if sub_choice in ["link", "live"] and not clean_path.startswith("http"):
-                clean_path = "https://" + clean_path
-                
-            is_url = clean_path.startswith("http://") or clean_path.startswith("https://")
-            
-            if not is_url and not os.path.exists(clean_path):
-                console.print(f"[red]❌ File not found and does not look like a valid URL:[/red] {clean_path}")
-                time.sleep(2)
-                continue
-
-            selected_quality = None
-            if is_url:
-                selected_quality = questionary.select(
-                    "Select Max Quality:",
-                    choices=[
-                        questionary.Choice("  🚀  Best Available", value="best"),
-                        questionary.Choice("  💎  1080p", value="1080"),
-                        questionary.Choice("  🎬  720p", value="720"),
-                        questionary.Choice("  📺  480p", value="480"),
-                        questionary.Choice("  📟  360p", value="360"),
-                    ],
-                    style=QSTYLE,
-                ).ask()
-                if selected_quality == "best":
-                    selected_quality = None
-
-            with status_after("[yellow]▶️ Preparing playback...[/yellow]", center=True):
-                time.sleep(0.5)
-            
-            play_video(clean_path, anime_title="Custom Playback", episode_num="", is_custom=True, is_live=is_live_stream, quality=selected_quality, ipc_server=ipc_server_path)
-            
-        elif choice == 'search':
-            # Search with History helper
-            search_query_choices = [questionary.Choice(f"  🕐  {q}", value=q) for q in search_history[:5]]
-            if search_query_choices:
-                search_query_choices.append(questionary.Separator())
-            search_query_choices.append(questionary.Choice("  🆕  New Search", value="new"))
-            search_query_choices.append(questionary.Separator())
-            search_query_choices.append(questionary.Choice("  🔙  Back", value="back"))
-            
-            if search_history:
-                query_choice = questionary.select("Search Anime:", choices=search_query_choices, style=QSTYLE).ask()
-                if query_choice == "back" or query_choice is None:
-                    continue
-                if query_choice == "new":
-                    query = questionary.text("Enter anime title (leave blank to go back):", style=QSTYLE).ask()
+                    if not c_path: continue
                 else:
-                    query = query_choice
-            else:
-                query = questionary.text("Enter anime title (leave blank to go back):", style=QSTYLE).ask()
+                    c_path = questionary.text("Enter URL:", style=QSTYLE).ask()
+                    if not c_path: continue
                 
-            if not query:
-                continue
+                clean_path = c_path.strip("\"'")
+                if sub_choice in ["link", "live"] and not clean_path.startswith("http"): clean_path = "https://" + clean_path
                 
-            if query not in search_history:
-                search_history.insert(0, query)
+                with status_after("[yellow]▶️ Preparing playback...[/yellow]", center=True): time.sleep(0.5)
+                play_video(clean_path, anime_title="Custom Playback", is_custom=True, is_live=is_live, ipc_server=ipc_server_path)
+
+            elif choice == 'search':
+                sq_choices = [questionary.Choice(f"  🕒  {search_history[i]}", value=search_history[i]) for i in range(min(5, len(search_history)))]
+                if sq_choices: sq_choices.append(questionary.Separator())
+                sq_choices.append(questionary.Choice("  🔍  New Search", value="new"))
+                sq_choices.append(questionary.Choice("  🔙  Back", value="back"))
                 
-            with status_after(f"[yellow]🔍 Searching for '{query}'[/yellow]", center=True):
-                try:
-                    # Search results stay for 1h, increasing per_page to 50 for thicker result sets
-                    data = fetch_json(f"{API_BASE}/search", params={"query": query, "per_page": 50}, ttl_hours=1)
-                    results = data.get("results", [])
-                except Exception as e:
-                    console.print(f"[red]❌ Connection Error: {e}[/red]")
-                    console.print("[dim]Check 'data/logs/streamix_backend.log' for details.[/dim]")
-                    continue
-            
-            if not results:
-                console.print(Align.center("[red]❌ No anime found![/red]"))
-                time.sleep(1.5)
-                continue
+                q_choice = questionary.select("Search:", choices=sq_choices, style=QSTYLE).ask()
+                if q_choice == "back" or q_choice is None: continue
                 
-            selected_anime = show_anime_grid(results)
-            while selected_anime:
-                action, payload = display_anime_details(selected_anime)
-                if action == "watch":
-                    t_str, anilist_id = payload
-                    handle_episode_flow(anilist_id, t_str, ipc_server_path=ipc_server_path)
-                    break
-                elif action == "relation":
-                    selected_anime = payload
+                if q_choice == "new":
+                    query = questionary.text("Enter anime title:", style=QSTYLE).ask()
                 else:
-                    break
+                    query = q_choice
                     
-        elif choice == 'recent':
-            with status_after(f"[yellow]🆕 Fetching New Releases[/yellow]", center=True):
-                try:
-                    # New releases check every 2h
-                    data = fetch_json(f"{API_BASE}/recent", ttl_hours=2)
-                    results = data.get("results", [])
-                except Exception as e:
-                    console.print(f"[red]❌ Connection Error: {e}[/red]")
-                    console.print("[dim]Check 'data/logs/streamix_backend.log' for details.[/dim]")
-                    continue
-            
-            if not results:
-                console.print(Align.center("[red]❌ No recent releases found![/red]"))
-                time.sleep(1.5)
-                continue
+                if not query: continue
+                if query not in search_history: search_history.insert(0, query)
                 
-            selected_anime = show_anime_grid(results)
-            while selected_anime:
-                action, payload = display_anime_details(selected_anime)
-                if action == "watch":
-                    t_str, anilist_id = payload
-                    handle_episode_flow(anilist_id, t_str, ipc_server_path=ipc_server_path)
-                    break
-                elif action == "relation":
-                    selected_anime = payload
-                else:
-                    break
+                with status_after(f"[yellow]🔍 Searching for '{query}'[/yellow]", center=True):
+                    try:
+                        data = fetch_json(f"{API_BASE}/search", params={"query": query, "per_page": 50}, ttl_hours=1)
+                        results = data.get("results", [])
+                    except: results = []
+                
+                if not results:
+                    console.print(Align.center("[red]❌ No results found.[/red]")); time.sleep(1.5); continue
+                    
+                selected_anime = show_anime_grid(results)
+                while selected_anime:
+                    action, payload = display_anime_details(selected_anime)
+                    if action == "watch":
+                        handle_episode_flow(payload[1], payload[0], ipc_server_path=ipc_server_path)
+                        break
+                    elif action == "relation":
+                        selected_anime = payload
+                    else:
+                        break
 
-        elif choice == 'upcoming':
-            with status_after(f"[yellow]⏰ Fetching Upcoming Anime[/yellow]", center=True):
-                try:
-                    # Upcoming stays for 6h
-                    data = fetch_json(f"{API_BASE}/upcoming", ttl_hours=6)
-                    results = data.get("results", [])
-                except Exception as e:
-                    console.print(f"[red]❌ Connection Error: {e}[/red]")
-                    console.print("[dim]Check 'data/logs/streamix_backend.log' for details.[/dim]")
-                    continue
-            
-            if not results:
-                console.print(Align.center("[red]❌ No upcoming anime found![/red]"))
-                time.sleep(1.5)
-                continue
+            elif choice in ['recent', 'trending', 'popular', 'upcoming']:
+                labels = {'recent': 'New Releases', 'trending': 'Trending', 'popular': 'Top Popular', 'upcoming': 'Upcoming'}
+                with status_after(f"[yellow]📡 Fetching {labels[choice]}[/yellow]", center=True):
+                    try:
+                        data = fetch_json(f"{API_BASE}/{choice}", ttl_hours=2 if choice == 'recent' else 6)
+                        results = data.get("results", [])
+                    except: results = []
                 
-            selected_anime = show_anime_grid(results)
-            while selected_anime:
-                action, payload = display_anime_details(selected_anime)
-                if action == "watch":
-                    t_str, anilist_id = payload
-                    handle_episode_flow(anilist_id, t_str, ipc_server_path=ipc_server_path)
-                    break
-                elif action == "relation":
-                    selected_anime = payload
+                if results:
+                    selected_anime = show_anime_grid(results)
+                    while selected_anime:
+                        action, payload = display_anime_details(selected_anime)
+                        if action == "watch":
+                            handle_episode_flow(payload[1], payload[0], ipc_server_path=ipc_server_path)
+                            break
+                        elif action == "relation":
+                            selected_anime = payload
+                        else:
+                            break
                 else:
-                    break
+                    console.print(Align.center("[red]❌ Connection failed.[/red]")); time.sleep(1.5)
+
+            elif choice == 'history' and cache:
+                console.clear(); console.rule("[bold cyan]📜 WATCH HISTORY[/bold cyan]", style="cyan"); console.print()
+                sorted_h = sorted(cache.values(), key=lambda x: x.get("timestamp", 0), reverse=True)
+                h_opts = []
+                for idx, item in enumerate(sorted_h, 1):
+                    title = item.get("title", "Unknown")
+                    ep = item.get("last_watched_ep", "?")
+                    h_opts.append(questionary.Choice(f" {idx:>2} | {_trunc(title, 35):<37} | Ep {ep}", value=item))
+                h_opts.append(questionary.Separator()); h_opts.append(questionary.Choice("  🔙  Back", value="back"))
                 
-        elif choice == 'trending':
-            with status_after(f"[yellow]🔥 Fetching Trending Anime[/yellow]", center=True):
-                try:
-                    # Trending stays for 1h
-                    data = fetch_json(f"{API_BASE}/trending", ttl_hours=1)
-                    results = data.get("results", [])
-                except Exception as e:
-                    console.print(f"[red]❌ Connection Error: {e}[/red]")
-                    console.print("[dim]Check 'data/logs/streamix_backend.log' for details.[/dim]")
-                    continue
-            
-            if not results:
-                console.print(Align.center("[red]❌ No trending anime found![/red]"))
-                time.sleep(1.5)
-                continue
+                sel_item = questionary.select("Resume watching:", choices=h_opts, style=QSTYLE).ask()
+                if sel_item == "back" or sel_item is None: continue
                 
-            selected_anime = show_anime_grid(results)
-            while selected_anime:
-                action, payload = display_anime_details(selected_anime)
-                if action == "watch":
-                    t_str, anilist_id = payload
-                    handle_episode_flow(anilist_id, t_str, ipc_server_path=ipc_server_path)
-                    break
-                elif action == "relation":
-                    selected_anime = payload
-                else:
-                    break
-                
-        elif choice == 'popular':
-            with status_after(f"[yellow]🏆 Fetching Popular Anime[/yellow]", center=True):
-                try:
-                    # Popular stats stay for 6h
-                    data = fetch_json(f"{API_BASE}/popular", ttl_hours=6)
-                    results = data.get("results", [])
-                except Exception as e:
-                    console.print(f"[red]❌ Connection Error: {e}[/red]")
-                    console.print("[dim]Check 'data/logs/streamix_backend.log' for details.[/dim]")
-                    continue
-            
-            if not results:
-                console.print(Align.center("[red]❌ No popular anime found![/red]"))
-                time.sleep(1.5)
-                continue
-                
-            selected_anime = show_anime_grid(results)
-            while selected_anime:
-                action, payload = display_anime_details(selected_anime)
-                if action == "watch":
-                    t_str, anilist_id = payload
-                    handle_episode_flow(anilist_id, t_str, ipc_server_path=ipc_server_path)
-                    break
-                elif action == "relation":
-                    selected_anime = payload
-                else:
-                    break
-                
-        elif choice == 'history' and cache:
-            console.clear()
-            console.print()
-            console.rule("[bold cyan]📚 WATCH HISTORY[/bold cyan]", style="cyan")
-            console.print()
-            
-            # Sort by most recent
-            sorted_history = sorted(cache.values(), key=lambda x: x.get("timestamp", 0), reverse=True)
-            
-            h_choices = []
-            for idx, item in enumerate(sorted_history, 1):
-                title = item.get("title", "Unknown")
-                prov = item.get("provider", "?")
-                ep = item.get("last_watched_ep", "?")
-                status = item.get("status", "Watching")
-                watched_count = len(item.get("watched", []))
-                total_eps = item.get("total_eps", 0)
-                
-                if status == "Completed":
-                    progress_str = "✅ Done"
-                elif total_eps > 0:
-                    progress_str = f"{watched_count}/{total_eps}"
-                else:
-                    progress_str = f"Ep {ep}"
-                
-                h_choices.append(questionary.Choice(
-                    f" {idx:>2} | {_trunc(title, 35):<37} | {prov.upper():<10} | Ep {str(ep):<4} | {progress_str}",
-                    value=item
-                ))
-            
-            h_choices.append(questionary.Separator())
-            h_choices.append(questionary.Choice("  🔙  Back", value="back"))
-            
-            selected_item = questionary.select("Resume watching:", choices=h_choices, style=QSTYLE).ask()
-            
-            if selected_item == "back" or selected_item is None:
-                continue
-            
-            mock_anime = {"id": selected_item["anilist_id"], "title": {"english": selected_item["title"]}}
-            while mock_anime:
-                action, payload = display_anime_details(mock_anime)
-                if action == "watch":
-                    t_str, anilist_id = payload
-                    handle_episode_flow(
-                        anilist_id, 
-                        t_str, 
-                        pre_provider=selected_item.get("provider") if mock_anime.get("id") == selected_item["anilist_id"] else None,
-                        pre_category=selected_item.get("category") if mock_anime.get("id") == selected_item["anilist_id"] else None,
-                        ipc_server_path=ipc_server_path
-                    )
-                    break
-                elif action == "relation":
-                    mock_anime = payload
-                else:
-                    break
+                mock_a = {"id": sel_item["anilist_id"], "title": {"english": sel_item["title"]}}
+                while mock_a:
+                    action, payload = display_anime_details(mock_a)
+                    if action == "watch":
+                        handle_episode_flow(payload[1], payload[0], 
+                                            pre_provider=sel_item.get("provider") if mock_a["id"] == sel_item["anilist_id"] else None,
+                                            ipc_server_path=ipc_server_path)
+                        break
+                    elif action == "relation": mock_a = payload
+                    else: break
         else:
-            console.print("[red]❌ Invalid option![/red]")
+            console.print("[red]❌ View error.[/red]")
+            view = "home"
 
 if __name__ == "__main__":
     import signal
     
     def _signal_cleanup(signum, frame):
         """Handle SIGTERM/SIGINT for clean shutdown."""
-        console.print("\n[dim]Received shutdown signal, cleaning up...[/dim]")
-        stop_backend()
-        sys.exit(0)
+        # Just raise KeyboardInterrupt to let the try/finally handle it
+        raise KeyboardInterrupt
     
     signal.signal(signal.SIGTERM, _signal_cleanup)
     signal.signal(signal.SIGINT, _signal_cleanup)
@@ -1799,10 +1817,9 @@ if __name__ == "__main__":
         start_backend()
         main()
     except KeyboardInterrupt:
-        console.print(f"\n\n[bold magenta]Goodbye! ✨ Logging out of {PROJECT_NAME}[/bold magenta]")
+        console.print(f"\n\n[bold magenta]さようなら! 👋✨ Logging out of {PROJECT_NAME}[/bold magenta]")
     except Exception as e:
         console.print(f"\n\n[bold red]❌ CRITICAL ERROR:[/bold red] {e}")
         console.print("[dim]Backend has been safely shut down.[/dim]")
     finally:
         stop_backend()
-        sys.exit(0)

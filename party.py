@@ -6,14 +6,18 @@ import hashlib
 from pyngrok import ngrok
 import websockets
 from utils.os_detector import IS_WINDOWS
+from config import get_admin_config
 
-logging.basicConfig(level=logging.ERROR)
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("watch_party")
 
-# Suppress noisy websocket debug logs at the top level
+# Suppress noisy websocket debug logs
 logging.getLogger("websockets").setLevel(logging.ERROR)
 
 class WatchPartyServer:
     def __init__(self, room_name, host_name, max_users=10):
+        self._history_limit = get_admin_config().get("chat_history_limit", 500)
         self.room_name = room_name
         self.host_name = host_name
         self.max_users = max_users
@@ -23,15 +27,26 @@ class WatchPartyServer:
         
         # User details map: username -> info
         self.users = {
-            host_name: {"name": host_name, "role": "host", "muted": False, "deafened": False, "online": False, "ws": None, "ip": "localhost"}
+            host_name: {
+                "name": host_name, 
+                "role": "host", 
+                "muted": False, 
+                "deafened": False, 
+                "local_muted": True, # Host starts muted locally
+                "local_deafened": False,
+                "online": False, 
+                "ws": None, 
+                "ip": "localhost",
+                "last_spoke": 0
+            }
         }
         
         # Playback state
         self.playback_state = {
-            "url": None,
-            "anime_title": None,
-            "episode": None,
-            "state": "paused", # playing | paused
+            "url": "",
+            "anime_title": "Nothing",
+            "episode": "",
+            "state": "closed", # playing | paused | closed
             "timestamp": 0.0,
             "last_sync": time.time()
         }
@@ -41,10 +56,38 @@ class WatchPartyServer:
         
         # IP to last-known-username mapping (to handle name changes on reconnection)
         self.ip_to_name = {}
+        self.hash_to_name = {} # Map hash_id -> name for history resolution
         self.chat_history = [] # Rolling list of recent messages
+        self.last_logged_playback = {} # To throttle sync logs
         
-    def _broadcast(self, message, exclude_ws=None):
-        out_msg = json.dumps(message, ensure_ascii=False)
+    def _save_to_history(self, msg_payload):
+        """Standard method to save messages (chat or system) to history."""
+        self.chat_history.append(msg_payload)
+        
+        # Keep history at a reasonable limit from config
+        if len(self.chat_history) > self._history_limit:
+            self.chat_history.pop(0)
+
+    def _broadcast(self, message, exclude_ws=None, save_history=False, sender_hash=None):
+        if save_history:
+            self._save_to_history(message)
+            
+        # Determine if we are sending raw binary (voice) or JSON (chat/system)
+        is_binary = isinstance(message, bytes)
+        
+        # Binary Voice Packing: Prepend sender hash for Local Muting support
+        if is_binary and sender_hash:
+            try:
+                hash_bytes = sender_hash.encode('utf-8')
+                hash_len = len(hash_bytes)
+                if hash_len > 255: hash_len = 255
+                # Packet = [1-byte len] + [Hash ID] + [Audio Data]
+                out_msg = bytes([hash_len]) + hash_bytes[:hash_len] + message
+            except:
+                out_msg = message
+        else:
+            out_msg = message if is_binary else json.dumps(message, ensure_ascii=False)
+        
         for ws in list(self.clients.keys()):
             if ws != exclude_ws:
                 # Don't send chat or sync to deafened users, except admin messages
@@ -52,9 +95,17 @@ class WatchPartyServer:
                 if not client: continue
                 
                 user_info = self.users.get(client['name'])
-                if user_info and user_info['deafened']:
-                    if message['type'] in ['chat', 'sync']:
-                        continue
+                if not user_info: continue
+                
+                # Filter Logic:
+                if is_binary:
+                    # Don't send voice to deafened users (Global Deafen)
+                    if user_info.get('deafened'): continue
+                else:
+                    # Don't send chat/sync to deafened users (except system alerts)
+                    if user_info.get('deafened'):
+                        if isinstance(message, dict) and message.get('type') in ['chat', 'sync']:
+                            continue
                         
                 asyncio.create_task(self._send_safe(ws, out_msg))
 
@@ -73,6 +124,9 @@ class WatchPartyServer:
                 "role": info["role"],
                 "muted": info["muted"],
                 "deafened": info["deafened"],
+                "local_muted": info.get("local_muted", False),
+                "local_deafened": info.get("local_deafened", False),
+                "last_spoke": info.get("last_spoke", 0),
                 "online": info["online"],
                 "ip": info.get("ip", ""),
                 "hash_id": info.get("hash_id", ""),
@@ -97,41 +151,45 @@ class WatchPartyServer:
                 await websocket.close(1008, "Username required")
                 return
 
-            # Block banned users
-            if client_name in self.banned_users:
+            client_ip = "unknown"
+            try:
+                # Support new and old websockets versions for header access
+                headers = getattr(websocket, 'request_headers', None)
+                if headers is None and hasattr(websocket, 'request'):
+                    headers = websocket.request.headers
+                
+                if headers:
+                    # Order of preference for proxy headers
+                    potential_ips = [
+                        headers.get("X-Forwarded-For"),
+                        headers.get("X-Real-IP"),
+                        headers.get("CF-Connecting-IP"),
+                        headers.get("True-Client-IP")
+                    ]
+                    
+                    for ip_str in potential_ips:
+                        if ip_str:
+                            # Take the first IP in cases of comma-separated chains
+                            client_ip = ip_str.split(',')[0].strip()
+                            break
+                
+                if client_ip == "unknown" or not client_ip:
+                    client_ip = websocket.remote_address[0] if websocket.remote_address else "unknown"
+            except Exception as e:
+                logger.error(f"IP detection error for {client_name}: {e}")
+
+            # Generate a unique Hash ID based on IP 
+            # This is stable for the duration of the connection's IP source
+            hash_id = hashlib.md5(client_ip.encode()).hexdigest()[:6].upper()
+
+            # SECURITY CHECK: Block by Hash-ID (prevents name-change evasion)
+            if hash_id in self.banned_users:
                 await websocket.send(
                     json.dumps({"type": "error", "message": "You are banned from this room."}, ensure_ascii=False)
                 )
                 await websocket.close(1008, "Banned")
+                logger.warning(f"[SECURITY] Denied join from banned Hash-ID: #{hash_id} ({client_name})")
                 return
-
-            # Get client IP from websocket (multi-header check for proxies/ngrok)
-            client_ip = "unknown"
-            try:
-                headers = websocket.request_headers
-                # Order of preference for proxy headers
-                potential_ips = [
-                    headers.get("X-Forwarded-For"),
-                    headers.get("X-Real-IP"),
-                    headers.get("CF-Connecting-IP"),
-                    headers.get("True-Client-IP")
-                ]
-                
-                for ip_str in potential_ips:
-                    if ip_str:
-                        # Take the first IP in cases of comma-separated chains
-                        client_ip = ip_str.split(',')[0].strip()
-                        break
-                
-                if client_ip == "unknown" or not client_ip:
-                    client_ip = websocket.remote_address[0] if websocket.remote_address else "unknown"
-                
-                logger.info(f"Join request from {client_name}: Detected IP = {client_ip}")
-            except Exception as e:
-                logger.error(f"IP detection error for {client_name}: {e}")
-
-            # Generate a safe Hash ID for display
-            hash_id = hashlib.md5(client_ip.encode()).hexdigest()[:6].upper()
 
             # IP-based Identity Logic: If this IP has been here before under a different name,
             # and that user is offline, rename the old record instead of creating a new one.
@@ -163,10 +221,19 @@ class WatchPartyServer:
                     await websocket.close(1008, "Room full")
                     return
                     
-                self.users[client_name] = {"name": client_name, "role": "member", "muted": False, "deafened": False, "online": True, "ws": websocket, "ip": client_ip, "hash_id": hash_id}
+                self.users[client_name] = {
+                    "name": client_name, "role": "member", 
+                    "muted": False, "deafened": False, 
+                    "local_muted": True, "local_deafened": False,
+                    "online": True, "ws": websocket, "ip": client_ip, 
+                    "hash_id": hash_id, "last_spoke": 0
+                }
             
-            # Update IP mapping
+            logger.info(f"[JOIN] {client_name} ({hash_id}) from IP {client_ip}")
+            
+            # Update Identity mappings
             self.ip_to_name[client_ip] = client_name
+            self.hash_to_name[hash_id] = client_name
             self.clients[websocket] = {'name': client_name}
             
             # Send initial state
@@ -185,14 +252,15 @@ class WatchPartyServer:
             if self.chat_history:
                 # Dynamically resolve names in history in case users changed them
                 resolved_history = []
-                # Map hash_id -> current online name
-                current_names = {u.get("hash_id"): u.get("name") for u in self.users.values() if u.get("hash_id")}
+                # Map hash_id -> current online/best-known name
+                current_names = self.hash_to_name.copy()
                 
                 for msg in self.chat_history:
                     m = msg.copy()
-                    hid = m.get("hash_id")
-                    if hid in current_names:
-                        m["sender"] = current_names[hid]
+                    if m.get("type") == "chat":
+                        hid = m.get("hash_id")
+                        if hid in current_names:
+                            m["sender"] = current_names[hid]
                     resolved_history.append(m)
                 
                 await websocket.send(json.dumps({
@@ -205,15 +273,33 @@ class WatchPartyServer:
                 "subtype": "join", 
                 "actor": client_name,
                 "role": self.users[client_name]['role'],
-                "message": f"{client_name} joined the room."
-            })
+                "message": f"{client_name} joined the room.",
+                "time": time.strftime("%H:%M")
+            }, save_history=True)
             self._broadcast_user_list()
             
             # Message loop
             async for message in websocket:
+                if isinstance(message, bytes):
+                    # Relaying voice packet (binary payload)
+                    u = self.users.get(client_name)
+                    now = time.time()
+                    
+                    # Log voice activity start (cooldown of 5s between logs for the same user)
+                    if u:
+                        u["last_spoke"] = now
+                    
+                    # SERVER-SIDE MUTE CHECK: Only broadcast if user is NOT globally muted
+                    if u and u.get("muted"):
+                        continue
+                        
+                    # Include sender's unique Hash-ID so clients can perform Local Muting
+                    self._broadcast(message, exclude_ws=websocket, sender_hash=u.get('hash_id'))
+                    continue
+                    
                 try:
                     data = json.loads(message)
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, TypeError):
                     continue
                     
                 msg_type = data.get("type")
@@ -233,30 +319,51 @@ class WatchPartyServer:
                         "message": data.get("message", ""),
                         "time": time.strftime("%H:%M")
                     }
-                    self.chat_history.append(chat_payload)
-                    if len(self.chat_history) > 100:
-                        self.chat_history.pop(0)
-                        
-                    self._broadcast(chat_payload)
+                    # Log full chat content
+                    logger.info(f"[CHAT] {client_name} ({user_info.get('hash_id')}): {data.get('message')}")
+                    
+                    # Already saved via _broadcast(..., save_history=True) below
+                    # No need to manually append here
+                    
+                    self._broadcast(chat_payload, save_history=True)
                     
                 elif msg_type == "sync":
                     if user_info['role'] != 'host':
                         continue # Only host can sync
                     
+                    # Update state
+                    old_url = self.playback_state.get("url")
                     self.playback_state.update({
                         "url": data.get("url", self.playback_state["url"]),
                         "anime_title": data.get("anime_title", self.playback_state["anime_title"]),
                         "episode": data.get("episode", self.playback_state["episode"]),
-                        "state": data.get("state", self.playback_state["state"]),
                         "timestamp": data.get("timestamp", self.playback_state["timestamp"]),
-                        "last_sync": time.time()
+                        "state": data.get("state", self.playback_state["state"]),
                     })
                     
+                    # Throttled Logging: Only log if state/url changes or if seek > 10s
+                    should_log = False
+                    if old_url != self.playback_state["url"]:
+                        logger.info(f"[SYNC] New video: {self.playback_state['anime_title']} - {self.playback_state['url']}")
+                        should_log = True
+                    
+                    last_logged = self.last_logged_playback
+                    if (self.playback_state["state"] != last_logged.get("state") or
+                        abs(float(self.playback_state["timestamp"]) - float(last_logged.get("timestamp", -100))) > 10.0):
+                        should_log = True
+                    
+                    if should_log:
+                        logger.info(f"[SYNC] Playback Update: {self.playback_state['state']} at {self.playback_state['timestamp']}s (by {client_name})")
+                        self.last_logged_playback = self.playback_state.copy()
+                    
                     # Relay to others
+                    # Save history ONLY if it was a significant change (should_log)
                     self._broadcast({
                         "type": "sync",
-                        "playback": self.playback_state
-                    }, exclude_ws=websocket)
+                        "playback": self.playback_state,
+                        "time": time.strftime("%H:%M"),
+                        "hash_id": user_info.get("hash_id")
+                    }, save_history=should_log, exclude_ws=websocket)
                     
                 elif msg_type == "admin":
                     if user_info['role'] != 'host':
@@ -265,7 +372,19 @@ class WatchPartyServer:
                     action = data.get("action")
                     target = data.get("target")
                     
-                    if not target or target not in self.users or target == self.host_name:
+                    # TARGET RESOLUTION: Search by name or Hash-ID
+                    target_info = None
+                    if target in self.users:
+                        target_info = self.users[target]
+                    else:
+                        # Search for Hash-ID (case insensitive)
+                        for u_name, u_info in self.users.items():
+                            if u_info.get("hash_id", "").upper() == target.upper():
+                                target_info = u_info
+                                target = u_name # Resolve to actual username
+                                break
+                    
+                    if not target_info or target == self.host_name:
                         continue
                         
                     target_info = self.users[target]
@@ -280,9 +399,11 @@ class WatchPartyServer:
                             )
                             await target_info['ws'].close()
                         self._broadcast({"type": "system", "message": f"{target} was kicked."})
+                        logger.info(f"[ADMIN] {client_name} kicked {target}")
                         
                     elif action == "ban":
-                        self.banned_users.add(target)
+                        # Ban using the unique Hash-ID
+                        self.banned_users.add(target_info['hash_id'])
                         if target_info['ws']:
                             await target_info['ws'].send(
                                 json.dumps(
@@ -291,38 +412,73 @@ class WatchPartyServer:
                                 )
                             )
                             await target_info['ws'].close()
-                        self._broadcast({"type": "system", "message": f"{target} was banned."})
+                        self._broadcast({"type": "system", "message": f"{target} (#{target_info['hash_id']}) was banned."})
+                        logger.info(f"[ADMIN] {client_name} banned {target} [#{target_info['hash_id']}]")
                     
                     elif action == "unban":
-                        if target in self.banned_users:
-                            self.banned_users.discard(target)
-                            self._broadcast({"type": "system", "message": f"{target} was unbanned."})
+                        # Support unbanning by targeting a specific name if they are in the session, 
+                        # or by providing the Hash-ID directly (e.g., /unban #A1B2C3)
+                        h_id = target_info.get('hash_id') if target_info else (target[1:] if target.startswith('#') else target)
+                        
+                        if h_id in self.banned_users:
+                            self.banned_users.discard(h_id)
+                            self._broadcast({"type": "system", "message": f"User/ID {h_id} was unbanned."})
+                            logger.info(f"[ADMIN] {client_name} unbanned {h_id}")
                         else:
-                            if self.host_name in self.users and self.users[self.host_name]['ws']:
-                                await self.users[self.host_name]['ws'].send(
-                                    json.dumps(
-                                        {"type": "system", "message": f"{target} is not banned."},
-                                        ensure_ascii=False,
-                                    )
-                                )
+                            # Send error back to host
+                            for ws in self.clients:
+                                if self.clients[ws]['name'] == self.host_name:
+                                    asyncio.create_task(ws.send(json.dumps({
+                                        "type": "error", "message": f"Hash-ID {h_id} not found in ban list."
+                                    })))
+                                    break
                         
                     elif action == "mute":
-                        target_info['muted'] = not target_info['muted']
-                        status = "muted" if target_info['muted'] else "unmuted"
-                        self._broadcast({"type": "system", "message": f"{target} has been {status}."})
+                        target_info['muted'] = True
+                        log_msg = f"{target} has been muted by admin ({client_name})."
+                        logger.info(f"[ADMIN] {log_msg}")
+                        self._broadcast({"type": "system", "message": log_msg})
+                        
+                    elif action == "unmute":
+                        target_info['muted'] = False
+                        log_msg = f"{target} has been unmuted by admin ({client_name})."
+                        logger.info(f"[ADMIN] {log_msg}")
+                        self._broadcast({"type": "system", "message": log_msg})
                         
                     elif action == "deafen":
-                        target_info['deafened'] = not target_info['deafened']
-                        status = "deafened" if target_info['deafened'] else "undeafened"
-                        self._broadcast({"type": "system", "message": f"{target} has been {status}."})
+                        target_info['deafened'] = True
+                        log_msg = f"{target} has been deafened by admin ({client_name})."
+                        logger.info(f"[ADMIN] {log_msg}")
+                        self._broadcast({"type": "system", "message": log_msg})
+
+                    elif action in ["undeafen", "undefan"]:
+                        target_info['deafened'] = False
+                        log_msg = f"{target} has been undeafened by admin ({client_name})."
+                        logger.info(f"[ADMIN] {log_msg}")
+                        self._broadcast({"type": "system", "message": log_msg})
                         
                     self._broadcast_user_list()
+                    
+                elif msg_type == "voice_state":
+                    u = self.users.get(client_name)
+                    if u:
+                        old_m = u.get("local_muted")
+                        old_d = u.get("local_deafened")
+                        u["local_muted"] = data.get("muted", False)
+                        u["local_deafened"] = data.get("deafened", False)
+                        
+                        if old_m != u["local_muted"] or old_d != u["local_deafened"]:
+                            logger.info(f"Voice state change: {client_name} (local_muted={u['local_muted']}, local_deafened={u['local_deafened']})")
+                        
+                        self._broadcast_user_list()
                     
         except websockets.exceptions.ConnectionClosed:
             pass
         except Exception as e:
-            print(f"Error handling client: {e}")
-        finally:
+            logger.error(f"Error handling client {client_name}: {e}")
+            import traceback
+            traceback.print_exc()
+            
             if websocket in self.clients:
                 del self.clients[websocket]
             if client_name and client_name in self.users:
@@ -341,6 +497,7 @@ class WatchPartyServer:
                     "role": role,
                     "message": f"{client_name} left the room."
                 })
+                logger.info(f"[LEAVE] {client_name} ({role})")
                 self._broadcast_user_list()
                 
                 # If host leaves, completely terminate the server thereby disconnecting everyone
@@ -359,21 +516,10 @@ import logging
 import traceback
 from datetime import datetime
 import os
+from utils.logger import setup_logger
 
-# Ensure .logs directory exists
-log_dir = os.path.join(os.path.dirname(__file__), "data", "logs")
-os.makedirs(log_dir, exist_ok=True)
-
-# Configure logging to write to .logs/streamix_backend.log
-log_file_path = os.path.join(log_dir, "streamix_backend.log")
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(log_file_path, encoding='utf-8')
-    ]
-)
-logger = logging.getLogger("streamix_party")
+# Initialize centralized logger
+logger = setup_logger("party_server", "streamix_backend.log")
 
 # Suppress noisy handshake errors from ngrok 0-byte TCP ping probes
 logging.getLogger("websockets.server").setLevel(logging.CRITICAL)
@@ -386,22 +532,37 @@ async def _health_check(connection, request):
     # All requests proceed to WebSocket handshake
     return None
 
-async def serve(room_name, host_name, max_users, port=9000):
+async def serve(room_name, host_name, max_users, start_port=9000):
     server_logic = WatchPartyServer(room_name, host_name, max_users)
-    server = await websockets.serve(
-        server_logic.handler,
-        "0.0.0.0",
-        port,
-        ping_interval=20,
-        ping_timeout=20,
-        close_timeout=10,
-        max_size=2**20,  # 1MB max message
-        process_request=_health_check,
-        # No origin restriction — allow connections from any origin
-        # (Python clients, ngrok proxy, localhost, etc.)
-    )
-    logger.info(f"WebSocket server listening on 0.0.0.0:{port}")
-    return server
+    
+    # Port Selection Logic: Try start_port, then increment if busy
+    port = start_port
+    max_ports_to_try = 10
+    
+    for attempt in range(max_ports_to_try):
+        try:
+            # We use the higher-level serve which handles the loop internally
+            server = await websockets.serve(
+                server_logic.handler,
+                "0.0.0.0",
+                port,
+                ping_interval=20,
+                ping_timeout=20,
+                close_timeout=10,
+                max_size=2**20,
+                process_request=_health_check,
+            )
+            logger.info(f"[LIFECYCLE] WebSocket server bound to port {port}")
+            return server, port
+        except OSError as e:
+            if e.errno in [10048, 98, 48]: # Port in use (Win, Linux, macOS)
+                logger.warning(f"[LIFECYCLE] Port {port} is busy. Trying {port + 1}...")
+                port += 1
+                continue
+            else:
+                raise e
+    
+    raise OSError(f"Could not find a free port in range {start_port}-{start_port + max_ports_to_try}")
 
 def start_server_and_tunnel(room_name, host_name, max_users=10, port=9000):
     logger.info(f"Starting watch party server for room: {room_name}")
@@ -411,6 +572,7 @@ def start_server_and_tunnel(room_name, host_name, max_users=10, port=9000):
     import os
     if IS_WINDOWS:
         os.system("taskkill /F /IM ngrok.exe /T >nul 2>&1")
+        logger.info("[LIFECYCLE] Aggressive cleanup of stale ngrok processes performed.")
     else:
         os.system("pkill -9 ngrok >/dev/null 2>&1")
         
@@ -419,20 +581,19 @@ def start_server_and_tunnel(room_name, host_name, max_users=10, port=9000):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
-        # 1. Start WebSocket server FIRST so port 9000 is ready for connections
-        logger.info("Starting WebSocket server...")
-        print(f"[Party] Starting WebSocket server on port {port}...")
-        server = loop.run_until_complete(serve(room_name, host_name, max_users, port))
-        print(f"[Party] WebSocket server listening on port {port}")
+        # 1. Start WebSocket server FIRST
+        logger.info("[LIFECYCLE] WebSocket server starting...")
+        print(f"[Party] Searching for an available port starting at {port}...")
+        server, actual_port = loop.run_until_complete(serve(room_name, host_name, max_users, port))
         
-        # 2. THEN open ngrok tunnel (so it points to an already-listening port)
-        logger.info(f"Opening ngrok tunnel on port {port}...")
-        print("[Party] Opening ngrok tunnel...")
+        # 2. THEN open ngrok tunnel on the ACTUAL port found
+        logger.info(f"Opening ngrok tunnel on port {actual_port}...")
+        print(f"[Party] Port {actual_port} secured. Opening ngrok tunnel...")
         
-        # Use http instead of tcp to avoid auth-token requirements and raw TCP ping issues
-        tunnel = ngrok.connect(port, "http")
-        public_url = tunnel.public_url.replace("https://", "wss://").replace("http://", "ws://")
-        logger.info(f"ngrok tunnel opened successfully: {public_url}")
+        # Use http instead of tcp to avoid auth-token requirements
+        tunnel = ngrok.connect(actual_port, "http")
+        public_url = tunnel.public_url.replace("https://", "wss://").replace("http://", "ws://").strip()
+        logger.info(f"[LIFECYCLE] ngrok tunnel opened successfully on port {actual_port}: {public_url}")
         print(f"[Party] Tunnel ready: {public_url}")
         
         # 3. Save room info for the admin client to read
@@ -476,4 +637,8 @@ if __name__ == "__main__":
     import sys
     room = sys.argv[1] if len(sys.argv) > 1 else "Watch Party"
     host = sys.argv[2] if len(sys.argv) > 2 else "Host"
-    start_server_and_tunnel(room, host)
+    try:
+        max_u = int(sys.argv[3]) if len(sys.argv) > 3 else 10
+    except ValueError:
+        max_u = 10
+    start_server_and_tunnel(room, host, max_users=max_u)

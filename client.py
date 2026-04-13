@@ -1,6 +1,7 @@
 import asyncio
 import json
 import websockets
+from websockets.protocol import State
 import time
 import subprocess
 import os
@@ -15,6 +16,11 @@ from rich.align import Align
 from rich.markup import escape
 from rich.console import Group
 from utils.os_detector import IS_WINDOWS
+from voice_manager import VoiceManager
+from utils.logger import setup_logger
+
+# Initialize client session logger
+logger = setup_logger("client_tui", "client_session.log")
 
 console = Console()
 CHAT_TOKEN = "__CHAT__"
@@ -32,7 +38,7 @@ class PartyClient:
         self.input_text = ""
         self.scroll_offset = 0 # Track how many lines we are scrolled up
         self.mpv_process = None
-        self.mpv_ipc_path = fr"\\.\pipe\anilix_client_{int(time.time())}" if IS_WINDOWS else f"/tmp/anilix_client_{int(time.time())}.sock"
+        self.mpv_ipc_path = fr"\\.\pipe\streamix_client_{int(time.time())}" if IS_WINDOWS else f"/tmp/streamix_client_{int(time.time())}.sock"
         
         # Local-only filters (only affect this user's view)
         self.local_muted = set()
@@ -44,6 +50,14 @@ class PartyClient:
         self.config = get_client_config()
         self.volume = self.config.get("volume", 100)
         self.notifications_enabled = self.config.get("notifications", True)
+        self.mic_muted = True 
+        self.speaker_muted = False
+        
+        # Audio restrictions from server (Admin forced)
+        self.admin_muted = False
+        self.admin_deafened = False
+        
+        self.voice_manager = None
         self.chat_limit = self.config.get("chat_history_limit", 50)
         self._last_sound_time = 0 # Cooldown for sounds
 
@@ -115,7 +129,7 @@ class PartyClient:
                 "close_timeout": 10,
                 "open_timeout": 15,
                 "additional_headers": {
-                    "User-Agent": "Anilix-Party-Client/1.0",
+                    "User-Agent": "Streamix-Party-Client/1.0",
                     "ngrok-skip-browser-warning": "true",
                 },
             }
@@ -133,12 +147,35 @@ class PartyClient:
             
             for attempt in range(1, max_retries + 1):
                 try:
-                    self.chat_history.append(f"[dim]Connecting to server (attempt {attempt}/{max_retries})...[/dim]")
+                    # DEEP SANITIZATION: Strip ALL non-standard URL characters
+                    # This removes invisible junk (Unicode boms, zero-width spaces, etc.)
+                    import re
+                    original_url = self.ws_url
+                    self.ws_url = re.sub(r"[^a-zA-Z0-9\.\-\:\/\?\=\&\_]", "", self.ws_url)
+                    
+                    if original_url != self.ws_url:
+                        logger.warning(f"[NETWORK] Sanitized URL from '{original_url}' to '{self.ws_url}'")
+                    
+                    target_display = self.ws_url
+                    if len(target_display) > 40:
+                        target_display = target_display[:37] + "..."
+                        
+                    self.chat_history.append(f"[dim]Connecting to {target_display} (attempt {attempt}/{max_retries})...[/dim]")
                     self.ws = await websockets.connect(self.ws_url, **connect_kwargs)
+                    logger.info(f"[LIFECYCLE] Connected to party server at {self.ws_url}")
                     break
                 except (ConnectionRefusedError, OSError, websockets.exceptions.InvalidStatusCode) as e:
+                    import socket
+                    if isinstance(e, socket.gaierror) or "getaddrinfo" in str(e):
+                        # DNS Failure - Log Hex for deep debugging
+                        url_hex = self.ws_url.encode('utf-8').hex()
+                        logger.error(f"[NETWORK] DNS Resolution failed for URL: {self.ws_url} (Hex: {url_hex})")
+                        error_hint = "Check for typos or spaces in URL"
+                    else:
+                        error_hint = str(e)
+                        
                     if attempt < max_retries:
-                        self.chat_history.append(f"[dim]Could not reach server, retrying in {retry_delay:.0f}s... ([red]{e}[/red])[/dim]")
+                        self.chat_history.append(f"[dim]Could not reach server, retrying in {retry_delay:.0f}s... ([red]{error_hint}[/red])[/dim]")
                         await asyncio.sleep(retry_delay)
                         retry_delay = min(retry_delay * 2, 15.0)
                     else:
@@ -149,13 +186,43 @@ class PartyClient:
                 json.dumps({"type": "join", "name": self.username, "role": "member"}, ensure_ascii=False)
             )
             
+            # Start Voice Manager with persistent config
+            from config import load_config
+            cfg = load_config()["client"]
+            mic_idx = cfg.get("mic_device_index")
+            
+            loop = asyncio.get_event_loop()
+            self.voice_manager = VoiceManager(loop, input_device=mic_idx)
+            self.voice_manager.on_voice_packet = self._voice_packet_callback
+            self.voice_manager.mic_muted = self.mic_muted
+            self.voice_manager.speaker_muted = self.speaker_muted
+            self.voice_manager.start()
+            logger.info(f"[LIFECYCLE] Voice Manager started (Input Index: {mic_idx})")
+            
             # Message loop
-            async for message_str in self.ws:
+            async for message in self.ws:
                 if not self.running:
                     break
                 
+                if isinstance(message, bytes):
+                    # Protocol: [1 byte: hash_len] + [N bytes: hash_id] + [Binary: compressed_audio]
+                    try:
+                        hash_len = int(message[0])
+                        sender_hash = message[1:1+hash_len].decode('utf-8')
+                        audio_payload = message[1+hash_len:]
+                        
+                        # Apply Local Mute/Deafen filter using Hash-ID
+                        if sender_hash in self.local_muted or sender_hash in self.local_deafened:
+                            continue
+                            
+                        if self.voice_manager:
+                            self.voice_manager.handle_incoming_audio(audio_payload)
+                    except Exception as e:
+                        logger.error(f"Error parsing voice packet header: {e}")
+                    continue
+                    
                 try:
-                    data = json.loads(message_str)
+                    data = json.loads(message)
                     mt = data.get("type")
                     
                     if mt == "room_state":
@@ -180,11 +247,41 @@ class PartyClient:
                     elif mt == "user_list":
                         self.users = data.get("users", [])
                         
+                        # Find self in list to check for forced mute/deafen
+                        for u in self.users:
+                            if u.get('name') == self.username:
+                                server_muted = u.get('muted', False)
+                                server_deafened = u.get('deafened', False)
+                                
+                                # 1. Synchronize Mic Mute
+                                if server_muted and not self.admin_muted:
+                                    self.admin_muted = True
+                                    self._append_chat("System", "[bold red]Your microphone has been muted by the Administrator.[/bold red]")
+                                    # Force-mute the local hardware
+                                    self.mic_muted = True
+                                    if self.voice_manager: self.voice_manager.mic_muted = True
+                                elif not server_muted and self.admin_muted:
+                                    self.admin_muted = False
+                                    self._append_chat("System", "[bold green]Your microphone has been unmuted by the Administrator.[/bold green]")
+                                    # Safety First: User must manually press Ctrl+K to re-enable mic.
+                                
+                                # 2. Synchronize Speaker Deafen
+                                if server_deafened and not self.admin_deafened:
+                                    self.admin_deafened = True
+                                    self._append_chat("System", "[bold red]You have been deafened by the Administrator.[/bold red]")
+                                    self.speaker_muted = True
+                                    if self.voice_manager: self.voice_manager.speaker_muted = True
+                                elif not server_deafened and self.admin_deafened:
+                                    self.admin_deafened = False
+                                    self._append_chat("System", "[bold green]The deafen restriction was lifted by the Administrator.[/bold green]")
+                                break
+                        
                     elif mt == "chat":
                         sender = data.get("sender", "Unknown")
+                        s_hash = data.get("hash_id")
                         msg = data.get("message", "")
                         # Local filter: skip if we locally muted or deafened this user
-                        if sender in self.local_muted or sender in self.local_deafened:
+                        if s_hash in self.local_muted or s_hash in self.local_deafened:
                             continue
                         self._append_chat(sender, msg)
                         if sender != self.username:
@@ -193,7 +290,18 @@ class PartyClient:
                     elif mt == "chat_history":
                         history = data.get("history", [])
                         for m in history:
-                            self._append_chat(m.get("sender"), m.get("message"), ts=m.get("time"))
+                            m_type = m.get("type", "chat")
+                            if m_type == "chat":
+                                self._append_chat(m.get("sender"), m.get("message"), ts=m.get("time"))
+                            elif m_type == "system":
+                                msg = m.get("message", "")
+                                self.chat_history.append(f"[dim italic]{escape(msg)}[/dim italic]")
+                            elif m_type == "sync":
+                                playback = m.get("playback", {})
+                                state = playback.get("state", "updated")
+                                title = playback.get("anime_title", "Nothing")
+                                if title != "Nothing" and state not in ["closed", "updated"]:
+                                    self.chat_history.append(f"[dim grey][Sync] {title} {state}[/dim grey]")
                         
                     elif mt == "system":
                         msg = data.get("message", "")
@@ -252,24 +360,41 @@ class PartyClient:
                             f"[bold red]Error:[/bold red] {escape(data.get('message', ''))}"
                         )
                         
-                    if len(self.chat_history) > 100:
-                        self.chat_history = self.chat_history[-100:]
+                    if len(self.chat_history) > 10000:
+                        self.chat_history = self.chat_history[-10000:]
                         
                 except Exception as e:
                     pass
                     
-        except websockets.exceptions.ConnectionClosed as e:
-            self.chat_history.append(f"[bold red]Connection lost: {e.reason if e.reason else 'Server closed connection'}[/bold red]")
+        except websockets.exceptions.InvalidStatus as e:
+            if e.response.status_code == 404:
+                self.chat_history.append("[bold red]Error: Connection Refused (404)[/bold red]")
+                self.chat_history.append("[yellow]The Party Link might be expired or invalid.[/yellow]")
+                self.chat_history.append("[dim]The Host may have restarted their terminal/ngrok.[/dim]")
+            else:
+                self.chat_history.append(f"[bold red]Connection rejected (HTTP {e.response.status_code}).[/bold red]")
+            
+            self.chat_history.append(f"[dim]This window will close in 5 seconds...[/dim]")
             self.running = False
-        except websockets.exceptions.InvalidStatusCode as e:
-            self.chat_history.append(f"[bold red]Connection rejected (HTTP {e.status_code}). Is the party still active?[/bold red]")
+            await asyncio.sleep(5)
+        except websockets.exceptions.ConnectionClosed as e:
+            self.chat_history.append(f"[bold red]Connection lost: {e.reason if e.reason else 'Host ended the session'}[/bold red]")
+            self.chat_history.append(f"[bold red]This terminal will close automatically in 3 seconds...[/bold red]")
             self.running = False
         except ConnectionRefusedError:
             self.chat_history.append("[bold red]Connection refused. The party server may not be running.[/bold red]")
             self.running = False
         except Exception as e:
+            logger.error(f"Failed to connect or system error: {e}", exc_info=True)
             self.chat_history.append(f"[bold red]Failed to connect: {type(e).__name__}: {e}[/bold red]")
             self.running = False
+        finally:
+            if self.voice_manager:
+                self.voice_manager.stop()
+
+    def _voice_packet_callback(self, data):
+        if self.ws and self.ws.state == State.OPEN:
+            asyncio.create_task(self.ws.send(data))
 
     def _launch_mpv(self, url, title, timestamp):
         from main import get_mpv_path, get_streaming_headers
@@ -298,40 +423,73 @@ class PartyClient:
         args.append(url)
         
         self.mpv_process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        logger.info(f"[LIFECYCLE] MPV process launched (PID: {self.mpv_process.pid}) for URL: {url}")
         
+    async def broadcast_voice_state(self):
+        if self.ws:
+            await self.ws.send(json.dumps({
+                "type": "voice_state",
+                "muted": self.mic_muted,
+                "deafened": self.speaker_muted
+            }))
+
     def _handle_local_command(self, cmd):
         """Handle client-side /commands for local mute/deafen."""
         parts = cmd.split(" ", 1)
         action = parts[0].lower()
         target = parts[1].strip() if len(parts) > 1 else ""
         
-        if action == "/mute":
+        if action in ["/mute", "/unmute"]:
             if not target:
-                if self.local_muted:
-                    self.chat_history.append(f"[yellow]Locally muted: {', '.join(self.local_muted)}[/yellow]")
-                else:
-                    self.chat_history.append("[yellow]No one is locally muted. Usage: /mute <user>[/yellow]")
+                self.chat_history.append(f"[yellow]Usage: {action} <Name/ID>[/yellow]")
                 return
-            if target in self.local_muted:
-                self.local_muted.discard(target)
-                self.chat_history.append(f"[green]Unmuted {target} (local).[/green]")
-            else:
-                self.local_muted.add(target)
-                self.chat_history.append(f"[yellow]Muted {target} (local). Their messages are now hidden for you.[/yellow]")
+            
+            # Resolve target to Hash-ID
+            target_hash = None
+            target_name = None
+            for u in self.users:
+                if u.get('name').lower() == target.lower() or u.get('hash_id') == target:
+                    target_hash = u.get('hash_id')
+                    target_name = u.get('name')
+                    break
+            
+            if not target_hash:
+                self.chat_history.append(f"[red]Could not find user: {target}[/red]")
+                return
                 
-        elif action == "/deafen":
-            if not target:
-                if self.local_deafened:
-                    self.chat_history.append(f"[yellow]Locally deafened: {', '.join(self.local_deafened)}[/yellow]")
-                else:
-                    self.chat_history.append("[yellow]No one is locally deafened. Usage: /deafen <user>[/yellow]")
-                return
-            if target in self.local_deafened:
-                self.local_deafened.discard(target)
-                self.chat_history.append(f"[green]Undeafened {target} (local).[/green]")
+            if action == "/mute":
+                self.local_muted.add(target_hash)
+                self.chat_history.append(f"[yellow]Locally muted {target_name} (#{target_hash}). Audio and chat are now ignored.[/yellow]")
             else:
-                self.local_deafened.add(target)
-                self.chat_history.append(f"[yellow]Deafened {target} (local). You will no longer hear their voice.[/yellow]")
+                if target_hash in self.local_muted:
+                    self.local_muted.remove(target_hash)
+                self.chat_history.append(f"[green]Locally unmuted {target_name}. Audio and chat restored.[/green]")
+                
+        elif action in ["/deafen", "/undeafen"]:
+            if not target:
+                self.chat_history.append(f"[yellow]Usage: {action} <Name/ID>[/yellow]")
+                return
+            
+            # Resolve target to Hash-ID
+            target_hash = None
+            target_name = None
+            for u in self.users:
+                if u.get('name').lower() == target.lower() or u.get('hash_id') == target:
+                    target_hash = u.get('hash_id')
+                    target_name = u.get('name')
+                    break
+            
+            if not target_hash:
+                self.chat_history.append(f"[red]Could not find user: {target}[/red]")
+                return
+                
+            if action == "/deafen":
+                self.local_deafened.add(target_hash)
+                self.chat_history.append(f"[yellow]Locally deafened {target_name} (#{target_hash}). You won't hear them anymore.[/yellow]")
+            else:
+                if target_hash in self.local_deafened:
+                    self.local_deafened.remove(target_hash)
+                self.chat_history.append(f"[green]Locally undeafened {target_name}. Audio restored.[/green]")
                 
         elif action == "/join":
             if getattr(self, 'current_video_url', None) and getattr(self, 'mpv_process', None) is None:
@@ -349,12 +507,12 @@ class PartyClient:
                 self.chat_history.append("[dim]No user list yet.[/dim]")
         
         elif action == "/help":
-            self.chat_history.append("[cyan]PgUp/PgDn[/cyan] — Scroll chat view")
-            self.chat_history.append("[cyan]Ctrl+V[/cyan] — Toggle Microphone (Mute)")
-            self.chat_history.append("[cyan]Ctrl+B[/cyan] — Toggle Voice (Deafen)")
-            self.chat_history.append("[cyan]/notification sounds <on|off>[/cyan] — Toggle all audio alerts (Chat, Join/Leave)")
-            self.chat_history.append("[cyan]/close[/cyan] — Close this window")
-            self.chat_history.append("[cyan]/help[/cyan] — Show this help")
+            self.chat_history.append("[dim]── Local Controls ──[/dim]")
+            self.chat_history.append("[dim] /mute [Name/ID]   /unmute [Name/ID][/dim]")
+            self.chat_history.append("[dim] /deafen [Name/ID] /undeafen [Name/ID][/dim]")
+            self.chat_history.append("[dim] Ctrl+K: Mic Toggle       Ctrl+T: Deafen Toggle[/dim]")
+            self.chat_history.append("[dim] Ctrl+N: Sounds Toggle    PgUp/Dn: Scroll Dim[/dim]")
+            self.chat_history.append("[dim] /users: List Online      /close: Exit Application[/dim]")
         elif action == "/notification":
             if target.lower().startswith("sounds"):
                 # Handle "/notification sounds on" or "/notification sounds off"
@@ -408,27 +566,78 @@ class PartyClient:
             Layout(name="input", size=3)
         )
         layout["main"].split_row(
-            Layout(name="users", size=28),
+            Layout(name="sidebar", size=25),
             Layout(name="chat")
         )
         
-        header_text = f"[bold magenta]{self.room_name}[/bold magenta] | 👤 {self.username}"
-        layout["header"].update(Panel(Align.center(header_text), box=box.ROUNDED))
+        # Header with dynamic status icons
+        mic_icon = "🎙️" if not self.mic_muted else "🔇"
+        speaker_icon = "🔊" if not self.speaker_muted else "🔇"
+        notif_icon = "🔔" if self.notifications_enabled else "🔕"
+        
+        status_bar = f"[bold] {mic_icon} | {speaker_icon} | {notif_icon} [/bold]"
+        header_text = f"[bold magenta]{self.room_name}[/bold magenta] [dim]•[/dim] 👤 [bold cyan]{self.username}[/bold cyan] [dim]|[/dim] {status_bar}"
+        layout["header"].update(Panel(Align.center(header_text), box=box.ROUNDED, title="[dim]Streamix Client[/dim]", border_style="blue"))
         
         # Users panel
         from rich.table import Table
-        user_table = Table(show_header=False, expand=True, box=None)
-        user_table.add_column("Status")
+        user_table = Table(show_header=True, expand=True, box=None)
+        user_table.add_column("", width=2)
         user_table.add_column("Name")
+        user_table.add_column("🎙️", width=3, justify="center")
+        user_table.add_column("🔊", width=3, justify="center")
         for u in self.users:
-            icon = "👑" if u.get('role') == 'host' else "🟢" if u.get('online') else "🔴"
             name = u.get('name', '?')
-            flags = []
-            if name in self.local_muted: flags.append("🔇")
-            if name in self.local_deafened: flags.append("🔕")
-            name_display = f"{name} {' '.join(flags)}" if flags else name
-            user_table.add_row(icon, name_display)
-        layout["users"].update(Panel(user_table, title="Users", border_style="cyan"))
+            is_host = u.get('role') == 'host'
+            icon = "👑" if is_host else ("🟢" if u.get('online') else "🔴")
+            
+            # Voice / Audio Icons (Discord style)
+            mic_part = ""
+            def_part = ""
+            
+            # Mic logic
+            is_speaking = (time.time() - u.get('last_spoke', 0)) < 0.8
+            if u.get('muted'): # Global
+                mic_part = "[red]🔇[/red]"
+            elif u.get('hash_id') in self.local_muted: # Local
+                mic_part = "[dim]🔇[/dim]"
+            elif is_speaking:
+                mic_part = "[bold green]🎙️[/bold green]"
+            else:
+                mic_part = "[dim]🎙️[/dim]"
+                
+            # Deafen logic
+            if u.get('deafened'): # Global
+                def_part = "[red]🔕[/red]"
+            elif u.get('hash_id') in self.local_deafened: # Local
+                def_part = "[dim]🔕[/dim]"
+            else:
+                def_part = "[dim]🔊[/dim]"
+            
+            # Split into columns
+            display_name = f"{name}\n[dim]#{u.get('hash_id', '????')}[/dim]"
+            user_table.add_row(icon, display_name, mic_part, def_part)
+            
+        user_panel = Panel(user_table, title="👥 Participants", border_style="blue")
+        
+        # Audio Meter
+        meter_content = "[dim]Mic Muted[/dim]"
+        if not self.mic_muted:
+            vol = getattr(self.voice_manager, 'current_volume', 0.0)
+            bar_len = int(vol * 20)
+            bar = "■" * bar_len + " " * (20 - bar_len)
+            color = "green" if vol < 0.6 else "yellow"
+            meter_content = f"[{color}]{bar}[/{color}]"
+            
+        audio_panel = Panel(Align.center(meter_content), title="🎙️ Your Mic", border_style="magenta")
+        
+        sidebar = Layout()
+        sidebar.split(
+            Layout(user_panel, ratio=4),
+            Layout(audio_panel, size=3)
+        )
+        
+        layout["sidebar"].update(sidebar)
         
         # Chat panel — align to bottom so new messages appear at bottom
         import shutil
@@ -473,10 +682,30 @@ class PartyClient:
                             self.input_text = ""
                     elif c in ['PAGEUP', '\x17']: # PAGEUP or Ctrl+W
                         self.scroll_offset += 5
-                        # Clamp scroll
                         self.scroll_offset = min(self.scroll_offset, max(0, len(self.chat_history) - 5))
                     elif c in ['PAGEDOWN', '\x13']: # PAGEDOWN or Ctrl+S
                         self.scroll_offset = max(0, self.scroll_offset - 5)
+                    elif c == '\x0b': # Ctrl+K
+                        if self.admin_muted:
+                            self.chat_history.append("[bold red]Cannot unmute: You are globally muted by the Host.[/bold red]")
+                        else:
+                            self.mic_muted = not self.mic_muted
+                            if self.voice_manager: self.voice_manager.mic_muted = self.mic_muted
+                            self.chat_history.append(f"[dim]🎙️ Mic {'On' if not self.mic_muted else 'Muted'}[/dim]")
+                            asyncio.create_task(self.broadcast_voice_state())
+                    elif c == '\x14': # Ctrl+T
+                        if self.admin_deafened:
+                            self.chat_history.append("[bold red]Cannot undeafen: You are globally deafened by the Host.[/bold red]")
+                        else:
+                            self.speaker_muted = not self.speaker_muted
+                            if self.voice_manager: self.voice_manager.speaker_muted = self.speaker_muted
+                            self.chat_history.append(f"[dim]🔊 Voice {'On' if not self.speaker_muted else 'Deafened'}[/dim]")
+                            asyncio.create_task(self.broadcast_voice_state())
+                    elif c == '\x0e': # Ctrl+N
+                        self.notifications_enabled = not self.notifications_enabled
+                        from config import update_client_config
+                        update_client_config(notifications=self.notifications_enabled)
+                        self.chat_history.append(f"[dim]🔔 Sounds {'On' if self.notifications_enabled else 'Off'}[/dim]")
                     else:
                         if c.isprintable():
                             self.input_text += c
@@ -501,44 +730,46 @@ class PartyClient:
                     live.update(self.generate_layout())
                     await asyncio.sleep(0.05)
                     if self.mpv_process and self.mpv_process.poll() is not None:
-                        # mpv closed manually by user or by host changing episode
-                        # Don't close the chat — just clear the process so we don't keep polling
                         self.mpv_process = None
+                        self.chat_history.append("[dim]Video player closed.[/dim]")
+            
+                # Final countdown loop before closing
+                for i in range(5, 0, -1):
+                    self.chat_history.append(f"[bold yellow]⚠️ Session ended. Terminal closing in {i}...[/bold yellow]")
+                    live.update(self.generate_layout())
+                    await asyncio.sleep(1)
+            
         finally:
-            input_handler.cleanup()
-            # Kill mpv if still running (no point playing without sync)
-            if getattr(self, 'mpv_process', None):
-                try: await self._send_mpv_command(["quit"])
-                except: pass
+            self.running = False
+            if self.voice_manager:
+                self.voice_manager.stop()
+            if self.mpv_process:
                 try: self.mpv_process.terminate()
                 except: pass
-                try: self.mpv_process.kill()
-                except: pass
-            # Close WebSocket gracefully
-            if self.ws:
-                try: await self.ws.close()
-                except: pass
-            # Show shutdown message briefly so user can read disconnect reason
-            if not self.running:
-                console.print("\n[bold yellow]Closing in 3 seconds...[/bold yellow]")
-                await asyncio.sleep(3)
+            
+            # Explicit exit to close the terminal window
+            import sys
+            sys.exit(0)
 
 if __name__ == "__main__":
     import sys
     import signal
-    
-    # Handle SIGTERM from pkill so script exits cleanly
-    def _handle_term(signum, frame):
-        raise SystemExit(0)
-    signal.signal(signal.SIGTERM, _handle_term)
-    
-    url = sys.argv[1] if len(sys.argv) > 1 else "ws://localhost:9000"
-    username = sys.argv[2] if len(sys.argv) > 2 else f"Guest_{int(time.time())%1000}"
+    import traceback
     
     try:
+        # Handle SIGTERM from pkill so script exits cleanly
+        def _handle_term(signum, frame):
+            raise SystemExit(0)
+        signal.signal(signal.SIGTERM, _handle_term)
+        
+        url = sys.argv[1] if len(sys.argv) > 1 else "ws://localhost:9000"
+        username = sys.argv[2] if len(sys.argv) > 2 else f"Guest_{int(time.time())%1000}"
+        
         client = PartyClient(ws_url=url, username=username)
         asyncio.run(client.run())
     except (KeyboardInterrupt, SystemExit):
         pass
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"\n[bold red]FATAL ERROR:[/bold red] {e}")
+        traceback.print_exc()
+        input("\nPress Enter to exit...")

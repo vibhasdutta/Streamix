@@ -16,13 +16,15 @@ DEFAULT_CONFIG = {
         "default_room_name": "",
         "default_host_name": "",
         "chat_history_limit": 50,
-        "sync_interval_seconds": 1
+        "sync_interval_seconds": 1,
+        "mic_device_index": None
     },
     "client": {
         "volume": 100,
         "notifications": True,
         "default_username": "",
-        "chat_history_limit": 50
+        "chat_history_limit": 50,
+        "mic_device_index": None
     }
 }
 
