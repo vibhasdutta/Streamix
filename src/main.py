@@ -280,36 +280,32 @@ def _open_in_new_terminal(script_name, args, title="Streamix"):
     py = sys.executable
     script = os.path.abspath(script_name)
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    child_argv = [py, script] + [str(a) for a in args]
 
     proc = None
 
     if current_os is OS.WINDOWS:
-        # Windows: launch in a dedicated console to avoid fragile start/cmd quoting.
-        args_cmd = subprocess.list2cmdline([str(a) for a in args]) if args else ""
-        
-        # Simplify: Set CWD in Popen directly to avoid nested quoting issues in cmd /k
-        # Use 'uv run' to ensure the correct environment is used.
-        command = f'uv run "{script}"'
-        if args_cmd:
-            command += f" {args_cmd}"
-        
+        # Windows: run script with the current interpreter in a dedicated console.
+        # This avoids dependency on shell-specific tools in child terminals.
+        command = subprocess.list2cmdline(child_argv)
         logger.info(f"[LIFECYCLE] Launching {script_name} in new Windows Terminal: {title}")
         create_new_console = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
-        
-        # On Windows, passing the entire string to cmd /k wrapped in quotes is the robust way
-        # to handle inner quotes. CMD will strip the outer quotes and execute the rest.
-        full_cmd = f'cmd /k "{command}"'
-        proc = subprocess.Popen(full_cmd, creationflags=create_new_console, cwd=project_root)
+
+        proc = subprocess.Popen(
+            ["cmd", "/k", command],
+            creationflags=create_new_console,
+            cwd=project_root,
+        )
 
     elif current_os is OS.MACOS:
         # macOS: open a new Terminal.app window via AppleScript
-        script_cmd = f'cd "{project_root}"; {shlex.quote(py)} {shlex.quote(script)}'
-        if args:
-            script_cmd += " " + " ".join(f'"{a}"' for a in args)
+        script_cmd = f"cd {shlex.quote(project_root)}; " + " ".join(
+            shlex.quote(part) for part in child_argv
+        )
         script_cmd += "; exit"
         
         # Proper escaping for AppleScript "do script"
-        escaped_script = script_cmd.replace('"', '\\"')
+        escaped_script = script_cmd.replace("\\", "\\\\").replace('"', '\\"')
         applescript = f'tell application "Terminal" to do script "{escaped_script}"'
         proc = subprocess.Popen(["osascript", "-e", applescript])
         
@@ -321,9 +317,57 @@ def _open_in_new_terminal(script_name, args, title="Streamix"):
                 shutil.which("alacritty") or 
                 shutil.which("xterm"))
         if term:
-            command = " ".join(shlex.quote(part) for part in ([py, script] + list(args)))
-            command = f"cd {shlex.quote(project_root)} && {command}"
-            cmd_args = [term, "-e", "bash", "-lc", f"{command}; exit"]
+            command = " ".join(shlex.quote(part) for part in child_argv)
+            terminal_name = os.path.basename(term)
+
+            if terminal_name == "gnome-terminal":
+                cmd_args = [
+                    term,
+                    "--working-directory",
+                    project_root,
+                    "--",
+                    "bash",
+                    "-lc",
+                    f"{command}; exec bash",
+                ]
+            elif terminal_name == "konsole":
+                cmd_args = [
+                    term,
+                    "--workdir",
+                    project_root,
+                    "-e",
+                    "bash",
+                    "-lc",
+                    f"{command}; exec bash",
+                ]
+            elif terminal_name == "alacritty":
+                cmd_args = [
+                    term,
+                    "--working-directory",
+                    project_root,
+                    "-e",
+                    "bash",
+                    "-lc",
+                    f"{command}; exec bash",
+                ]
+            elif terminal_name == "xterm":
+                cmd_args = [
+                    term,
+                    "-e",
+                    "bash",
+                    "-lc",
+                    f"cd {shlex.quote(project_root)} && {command}; exec bash",
+                ]
+            else:
+                # Generic fallback for distro-provided terminal wrappers.
+                cmd_args = [
+                    term,
+                    "-e",
+                    "bash",
+                    "-lc",
+                    f"cd {shlex.quote(project_root)} && {command}; exec bash",
+                ]
+
             proc = subprocess.Popen(cmd_args)
         else:
             console.print("[red]Could not find a suitable terminal emulator![/red]")

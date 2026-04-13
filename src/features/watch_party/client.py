@@ -92,6 +92,9 @@ class PartyClient:
     def _get_mpv_property_sync(self, prop):
         """Synchronously request a property from mpv via IPC."""
         try:
+            if not IS_WINDOWS and not os.path.exists(self.mpv_ipc_path):
+                return None
+
             if IS_WINDOWS:
                 with open(self.mpv_ipc_path, 'r+') as f:
                     f.write(json.dumps({"command": ["get_property", prop]}) + "\n")
@@ -107,6 +110,21 @@ class PartyClient:
                 return res.get("data")
         except Exception:
             return None
+
+    async def _wait_for_mpv_ipc_ready(self, timeout=3.0):
+        """Wait briefly until mpv IPC responds to property queries."""
+        start = time.time()
+        while (time.time() - start) < timeout:
+            if self.mpv_process and self.mpv_process.poll() is not None:
+                return False
+
+            pause_state = await asyncio.to_thread(self._get_mpv_property_sync, "pause")
+            if isinstance(pause_state, bool):
+                return True
+
+            await asyncio.sleep(0.1)
+
+        return False
 
     def _play_event_sound(self, filename):
         if not self.notifications_enabled:
@@ -253,10 +271,10 @@ class PartyClient:
                             launched = self._launch_mpv(url, title, timestamp)
                             if launched:
                                 self.current_video_url = url
+                                await self._wait_for_mpv_ipc_ready(timeout=4.0)
                             
                             # pause if host is paused
                             if state == 'paused':
-                                await asyncio.sleep(1) # wait for mpv to start
                                 await self._send_mpv_command(["set_property", "pause", True])
                                 
                     elif mt == "user_list":
@@ -361,9 +379,18 @@ class PartyClient:
                                 launched = self._launch_mpv(url, title, timestamp)
                                 if launched:
                                     self.current_video_url = url
-                                    await asyncio.sleep(1) # wait for mpv IPC
+                                    await self._wait_for_mpv_ipc_ready(timeout=4.0)
                                 else:
                                     self.current_video_url = None
+                                    continue
+
+                            if not getattr(self, 'mpv_process', None) or self.mpv_process.poll() is not None:
+                                self.current_video_url = None
+                                continue
+
+                            ipc_ready = await self._wait_for_mpv_ipc_ready(timeout=1.2)
+                            if not ipc_ready:
+                                continue
                                 
                             # Sync mpv (sync is never locally filtered — host controls playback)
                             await self._send_mpv_command(["set_property", "pause", state == "paused"])
