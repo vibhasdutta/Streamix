@@ -279,12 +279,13 @@ def _open_in_new_terminal(script_name, args, title="Streamix"):
     """Open a Python script in a new terminal window. Works on macOS, Windows, and Linux."""
     py = "uv"
     script = os.path.abspath(script_name)
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     proc = None
 
     if current_os is OS.WINDOWS:
         # Windows: open a new cmd window
-        command = f'"{py}" run "{script}"'
+        command = f'cd /d "{project_root}" && "{py}" run "{script}"'
         if args:
             command += " " + " ".join(f'"{a}"' for a in args)
         logger.info(f"[LIFECYCLE] Launching {script_name} in new Windows Terminal: {title}")
@@ -292,7 +293,7 @@ def _open_in_new_terminal(script_name, args, title="Streamix"):
 
     elif current_os is OS.MACOS:
         # macOS: open a new Terminal.app window via AppleScript
-        script_cmd = f'"{py}" run "{script}"'
+        script_cmd = f'cd "{project_root}"; "{py}" run "{script}"'
         if args:
             script_cmd += " " + " ".join(f'"{a}"' for a in args)
         script_cmd += "; exit"
@@ -311,6 +312,7 @@ def _open_in_new_terminal(script_name, args, title="Streamix"):
                 shutil.which("xterm"))
         if term:
             command = " ".join(shlex.quote(part) for part in ([py, "run", script] + list(args)))
+            command = f"cd {shlex.quote(project_root)} && {command}"
             cmd_args = [term, "-e", "bash", "-lc", f"{command}; exit"]
             proc = subprocess.Popen(cmd_args)
         else:
