@@ -12,6 +12,8 @@ from pyngrok import ngrok
 import websockets
 from shared.utils.os_detector import IS_WINDOWS
 from core.config import get_admin_config
+from core.paths import PARTY_INFO_PATH, ensure_data_directories
+from shared.utils.logger import install_asyncio_exception_handler
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -572,6 +574,8 @@ async def serve(room_name, host_name, max_users, start_port=9000):
 def start_server_and_tunnel(room_name, host_name, max_users=10, port=9000):
     logger.info(f"Starting watch party server for room: {room_name}")
     print(f"[Party] Starting watch party: {room_name}")
+
+    ensure_data_directories()
     
     # Aggressive cleanup of any zombie ngrok processes before starting
     import os
@@ -585,6 +589,7 @@ def start_server_and_tunnel(room_name, host_name, max_users=10, port=9000):
         # Fix Python 3.10+ asyncio warning
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        install_asyncio_exception_handler(loop, logger)
         
         # 1. Start WebSocket server FIRST
         logger.info("[LIFECYCLE] WebSocket server starting...")
@@ -602,10 +607,7 @@ def start_server_and_tunnel(room_name, host_name, max_users=10, port=9000):
         print(f"[Party] Tunnel ready: {public_url}")
         
         # 3. Save room info for the admin client to read
-        json_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-        os.makedirs(json_dir, exist_ok=True)
-        party_info_path = os.path.join(json_dir, "party_info.json")
-        with open(party_info_path, "w") as f:
+        with open(PARTY_INFO_PATH, "w") as f:
             json.dump({
                 "url": public_url,
                 "room_name": room_name,
@@ -629,7 +631,8 @@ def start_server_and_tunnel(room_name, host_name, max_users=10, port=9000):
             server.close()
             loop.run_until_complete(server.wait_closed())
             try:
-                os.remove(party_info_path)
+                if PARTY_INFO_PATH.exists():
+                    PARTY_INFO_PATH.unlink()
             except:
                 pass
 

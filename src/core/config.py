@@ -3,11 +3,11 @@ Party Config — Persistent settings for Watch Party admin and client TUIs.
 Stored in party_config.json in the project root.
 """
 import json
-import os
 
-CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-os.makedirs(CONFIG_DIR, exist_ok=True)
-CONFIG_PATH = os.path.join(CONFIG_DIR, "party_config.json")
+from core.paths import PARTY_CONFIG_PATH, ensure_data_directories
+
+ensure_data_directories()
+CONFIG_PATH = PARTY_CONFIG_PATH
 
 DEFAULT_CONFIG = {
     "admin": {
@@ -32,7 +32,7 @@ def load_config():
     """Load config from disk, merging with defaults for any missing keys."""
     config = _deep_copy(DEFAULT_CONFIG)
     try:
-        if os.path.exists(CONFIG_PATH):
+        if CONFIG_PATH.exists():
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 saved = json.load(f)
             # Merge saved values into defaults

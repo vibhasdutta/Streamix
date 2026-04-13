@@ -1,3 +1,4 @@
+from shared.utils.logger import install_asyncio_exception_handler, setup_logger
 import asyncio
 import requests
 import os
@@ -12,7 +13,6 @@ import atexit
 import shutil
 import platform
 import hashlib
-from pathlib import Path
 from core.config import (
     load_config, 
     update_admin_config, 
@@ -20,6 +20,7 @@ from core.config import (
     get_admin_config,
     get_client_config
 )
+from core.paths import CACHE_DIR, DATA_DIR, LOGS_DIR, PARTY_INFO_PATH, ensure_data_directories
 from rich.console import Console
 from rich.table import Table
 from rich.prompt import Prompt
@@ -49,11 +50,8 @@ from shared.utils.logger import setup_logger
 logger = setup_logger("main_hub", "streamix_backend.log")
 
 API_BASE = "http://localhost:8000"
-JSON_DIR = Path("data")
-JSON_DIR.mkdir(exist_ok=True)
-CACHE_FILE = str(JSON_DIR / "recent_watch.json")
-CACHE_DIR = JSON_DIR / "cache"
-CACHE_DIR.mkdir(exist_ok=True)
+ensure_data_directories()
+CACHE_FILE = DATA_DIR / "recent_watch.json"
 
 console = Console()
 backend_process = None
@@ -220,9 +218,8 @@ def stop_backend():
     
     # Cleanup party info file
     try:
-        party_info = os.path.join(os.path.dirname(__file__), "data", "party_info.json")
-        if os.path.exists(party_info):
-            os.remove(party_info)
+        if PARTY_INFO_PATH.exists():
+            PARTY_INFO_PATH.unlink()
     except Exception:
         pass
     
@@ -264,10 +261,10 @@ def _cleanup_party():
     
     # 3. Cleanup state files
     try:
-        party_info = os.path.join(os.path.dirname(__file__), "data", "party_info.json")
-        if os.path.exists(party_info):
-            os.remove(party_info)
-    except: pass
+        if PARTY_INFO_PATH.exists():
+            PARTY_INFO_PATH.unlink()
+    except:
+        pass
     
     # Close leftover Terminal windows on macOS
     if IS_MACOS:
@@ -294,8 +291,8 @@ def _cleanup_party():
     
     # Remove party_info.json so the next host doesn't read stale data
     try:
-        if os.path.exists(party_info):
-            os.remove(party_info)
+        if PARTY_INFO_PATH.exists():
+            PARTY_INFO_PATH.unlink()
     except Exception:
         pass
     
@@ -386,11 +383,10 @@ def start_backend():
     # ── Start Backend ──
     with status_after(f"[bold yellow]🚀 Initializing {PROJECT_NAME} backend server[/bold yellow]", center=True):
         # Ensure .logs directory exists
-        log_dir = os.path.join(os.path.dirname(__file__), "data", "logs")
-        os.makedirs(log_dir, exist_ok=True)
+        log_dir = LOGS_DIR
         
         # Redirect stderr to a log file
-        log_file_path = os.path.join(log_dir, "streamix_backend.log")
+        log_file_path = log_dir / "streamix_backend.log"
         log_file = open(log_file_path, "a")
         log_file.write(f"\n--- SESSION START: {time.ctime()} ---\n")
         log_file.flush()
@@ -442,9 +438,7 @@ def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=Fal
 
     # ── Log Playback ──
     try:
-        log_dir = os.path.join(os.path.dirname(__file__), "data", "logs")
-        os.makedirs(log_dir, exist_ok=True)
-        with open(os.path.join(log_dir, "streamix_backend.log"), "a", encoding='utf-8') as f:
+        with open(LOGS_DIR / "streamix_backend.log", "a", encoding='utf-8') as f:
             ep_string = f" - Ep {episode_num}" if episode_num else ""
             f.write(f"PLAYBACK: [{time.ctime()}] {anime_title}{ep_string} | {url}\n")
     except:
@@ -555,7 +549,7 @@ def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=Fal
         return False
 
 def load_cache():
-    if os.path.exists(CACHE_FILE):
+    if CACHE_FILE.exists():
         try:
             with open(CACHE_FILE, "r") as f:
                 data = json.load(f)
@@ -981,6 +975,7 @@ def handle_audio_peripherals():
             except RuntimeError:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
+                install_asyncio_exception_handler(loop, logger)
             vm = VoiceManager(loop, input_device=mic_idx)
             vm.mic_muted = False
             vm.start()
@@ -1482,20 +1477,19 @@ def main():
                 
                 _cleanup_party()
                 time.sleep(0.5)
-                party_log = open(os.path.join(os.path.dirname(__file__), "data", "logs", "streamix_backend.log"), "a")
+                party_log = open(LOGS_DIR / "streamix_backend.log", "a")
                 party_log.write(f"\n--- WATCH PARTY SERVER START: {time.ctime()} ---\n")
                 party_log.flush()
                 party_proc = subprocess.Popen(["uv", "run", os.path.join(os.path.dirname(__file__), "features", "watch_party", "party.py"), room_name, host_name, max_users], stdout=party_log, stderr=party_log)
                 active_subprocesses.append(party_proc)
                 
-                party_info_path = os.path.join(os.path.dirname(__file__), "data", "party_info.json")
                 with status_after("[yellow]📡 Starting Party Server...[/yellow]", center=True):
                     for _ in range(25):
-                        if os.path.exists(party_info_path): break
+                        if PARTY_INFO_PATH.exists(): break
                         time.sleep(0.5)
                 
-                if os.path.exists(party_info_path):
-                    with open(party_info_path, "r") as f:
+                if PARTY_INFO_PATH.exists():
+                    with open(PARTY_INFO_PATH, "r") as f:
                         info = json.load(f)
                         console.print(f"\n[bold green]✅ Party ready! Share this link with friends:[/bold green]")
                         console.print(Align.center(f"[bold yellow]{info['url']}[/bold yellow]"))

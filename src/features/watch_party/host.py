@@ -23,6 +23,7 @@ from rich.console import Group
 from shared.utils.os_detector import IS_WINDOWS
 from features.voice_chat.voice_manager import VoiceManager
 from shared.utils.logger import setup_logger
+from core.paths import PARTY_INFO_PATH
 
 # Initialize host session logger
 logger = setup_logger("host_tui", "host_session.log")
@@ -69,7 +70,7 @@ class PartyAdminTUI:
         
         # Try to load info from file
         try:
-            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "party_info.json"), "r") as f:
+            with open(PARTY_INFO_PATH, "r") as f:
                 info = json.load(f)
                 self.room_url = info.get("url", "ws://localhost:9000")
                 self.room_name = info.get("room_name", "Party")
