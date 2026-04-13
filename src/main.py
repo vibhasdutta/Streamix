@@ -277,7 +277,7 @@ def _cleanup_party():
 
 def _open_in_new_terminal(script_name, args, title="Streamix"):
     """Open a Python script in a new terminal window. Works on macOS, Windows, and Linux."""
-    py = "uv"
+    py = sys.executable
     script = os.path.abspath(script_name)
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -286,7 +286,7 @@ def _open_in_new_terminal(script_name, args, title="Streamix"):
     if current_os is OS.WINDOWS:
         # Windows: launch in a dedicated console to avoid fragile start/cmd quoting.
         args_cmd = subprocess.list2cmdline([str(a) for a in args]) if args else ""
-        command = f'cd /d "{project_root}" && uv run "{script}"'
+        command = f'cd /d "{project_root}" && {subprocess.list2cmdline([py, script])}'
         if args_cmd:
             command += f" {args_cmd}"
         logger.info(f"[LIFECYCLE] Launching {script_name} in new Windows Terminal: {title}")
@@ -295,7 +295,7 @@ def _open_in_new_terminal(script_name, args, title="Streamix"):
 
     elif current_os is OS.MACOS:
         # macOS: open a new Terminal.app window via AppleScript
-        script_cmd = f'cd "{project_root}"; "{py}" run "{script}"'
+        script_cmd = f'cd "{project_root}"; {shlex.quote(py)} {shlex.quote(script)}'
         if args:
             script_cmd += " " + " ".join(f'"{a}"' for a in args)
         script_cmd += "; exit"
@@ -313,13 +313,15 @@ def _open_in_new_terminal(script_name, args, title="Streamix"):
                 shutil.which("alacritty") or 
                 shutil.which("xterm"))
         if term:
-            command = " ".join(shlex.quote(part) for part in ([py, "run", script] + list(args)))
+            command = " ".join(shlex.quote(part) for part in ([py, script] + list(args)))
             command = f"cd {shlex.quote(project_root)} && {command}"
             cmd_args = [term, "-e", "bash", "-lc", f"{command}; exit"]
             proc = subprocess.Popen(cmd_args)
         else:
             console.print("[red]Could not find a suitable terminal emulator![/red]")
     
+    if proc:
+        active_subprocesses.append(proc)
     return proc
 
 def start_backend():
