@@ -22,7 +22,7 @@ from core.config import (
     get_admin_config,
     get_client_config
 )
-from core.paths import BANNER_PATH, CACHE_DIR, DATA_DIR, LOGS_DIR, PARTY_INFO_PATH, ensure_data_directories
+from core.paths import BANNER_PATH, CACHE_DIR, DATA_DIR, LOGS_DIR, PARTY_INFO_PATH, PLAYBACK_STATE_PATH, ensure_data_directories
 from rich.console import Console
 from rich.table import Table
 from rich.prompt import Prompt
@@ -459,6 +459,27 @@ def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=Fal
     """Platform-aware video playback using mpv exclusively.
     """
     mpv_path = get_mpv_path()
+
+    # Persist the original requested media URL so the host sync poller can
+    # fall back to it when mpv exposes an internal derived URL (for example
+    # edl://... or other transient playlist entries).
+    try:
+        PLAYBACK_STATE_PATH.write_text(
+            json.dumps(
+                {
+                    "url": url,
+                    "anime_title": anime_title,
+                    "episode": episode_num,
+                    "start_time": start_time,
+                    "provider": provider,
+                    "updated_at": time.time(),
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
 
     # ── Log Playback ──
     try:
@@ -1533,7 +1554,12 @@ def main():
                             console.print(Align.center("[dim italic](Link automatically copied to your clipboard!)[/dim italic]"))
                         except: pass
                     
-                    _open_in_new_terminal(os.path.join(os.path.dirname(__file__), "features", "watch_party", "host.py"), [host_name, ipc_server_path or "", info['url']], title="Streamix Host")
+                    host_ws_url = info.get("local_url") or info["url"]
+                    _open_in_new_terminal(
+                        os.path.join(os.path.dirname(__file__), "features", "watch_party", "host.py"),
+                        [host_name, ipc_server_path or "", host_ws_url],
+                        title="Streamix Host",
+                    )
                     
                     console.print("[dim]Admin console opened in a new window.[/dim]")
                     party_active = True

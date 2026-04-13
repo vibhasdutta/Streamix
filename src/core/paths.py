@@ -9,6 +9,7 @@ LOGS_DIR = DATA_DIR / "logs"
 CACHE_DIR = DATA_DIR / "cache"
 PARTY_INFO_PATH = DATA_DIR / "party_info.json"
 PARTY_CONFIG_PATH = DATA_DIR / "party_config.json"
+PLAYBACK_STATE_PATH = DATA_DIR / "playback_state.json"
 BANNER_PATH = ASSETS_DIR / "banner.txt"
 SOUND_ASSETS_DIR = PROJECT_ROOT / "sound_assets"
 

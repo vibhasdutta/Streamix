@@ -1,6 +1,14 @@
 import shutil
 import os
 
+
+def is_network_media_url(url):
+    """Return True for network-playable URLs and False for local file paths."""
+    if not url:
+        return False
+    lower = str(url).strip().lower()
+    return lower.startswith(("http://", "https://", "rtmp://", "rtsp://", "m3u8://", "ytdl://"))
+
 def get_mpv_path():
     """Find mpv on the system (Linux/macOS)."""
     cmd = shutil.which("mpv")
@@ -28,26 +36,49 @@ def get_mpv_path():
 
 def get_streaming_headers(url, provider=None):
     """Generate optimal HTTP headers for a given stream URL/Provider."""
+    if not is_network_media_url(url):
+        return []
+
+    lower_url = str(url).lower()
+
+    # Only inject site headers for providers/domains that require anti-hotlink values.
+    provider_name = (provider or "").lower()
+    needs_site_headers = any(
+        token in lower_url
+        for token in ("kwik.cx", "bunny.net", "miruro", "anify", "anime")
+    ) or provider_name in {"kiwi", "kwik", "miruro"}
+
+    headers = []
+
     # Dynamic Referrer Logic
-    referrer = "https://miruro.to/" # Default
-    if "kwik.cx" in url:
+    referrer = "https://miruro.to/"
+    origin = "https://miruro.to"
+    if "kwik.cx" in lower_url:
         referrer = "https://kwik.cx/"
-    elif provider and provider.lower() == "kiwi":
+        origin = "https://kwik.cx"
+    elif provider_name == "kiwi":
         referrer = "https://kwik.cx/"
-    elif "bunny.net" in url:
+        origin = "https://kwik.cx"
+    elif "bunny.net" in lower_url:
         referrer = "https://miruro.to/"
-        
-    headers = [
-        f"--referrer={referrer}",
-        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-        # Standard browser origin
-        "--http-header-fields=Origin: https://miruro.to"
-    ]
-    
-    # Global optimizations for online streams
+
+    # Keep a generic browser UA for robust CDN compatibility.
+    headers.append(
+        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+    )
+
+    if needs_site_headers:
+        headers.extend(
+            [
+                f"--referrer={referrer}",
+                f"--http-header-fields=Origin: {origin}",
+                "--tls-verify=no",
+            ]
+        )
+
+    # Global online-stream optimizations that are safe across providers.
     optimizations = [
-        "--tls-verify=no",           # Skip verification if SNI/Certs are mismatched
-        "--cache-secs=60",           # Cache up to 60s ahead
-        "--hls-bitrate=max",         # Always aim for best HLS quality
+        "--cache-secs=60",
+        "--hls-bitrate=max",
     ]
     return headers + optimizations

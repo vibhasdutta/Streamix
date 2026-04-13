@@ -23,7 +23,7 @@ from rich.console import Group
 from shared.utils.os_detector import IS_WINDOWS
 from features.voice_chat.voice_manager import VoiceManager
 from shared.utils.logger import setup_logger
-from core.paths import PARTY_INFO_PATH
+from core.paths import PARTY_INFO_PATH, PLAYBACK_STATE_PATH
 from core.paths import SOUND_ASSETS_DIR
 
 # Initialize host session logger
@@ -77,6 +77,15 @@ class PartyAdminTUI:
                 self.room_name = info.get("room_name", "Party")
         except:
             pass
+
+    def _read_playback_state(self):
+        try:
+            if PLAYBACK_STATE_PATH.exists():
+                with open(PLAYBACK_STATE_PATH, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception:
+            pass
+        return {}
 
     def _append_chat(self, sender, message, ts=None):
         if not ts: ts = time.strftime("%H:%M")
@@ -625,6 +634,38 @@ class PartyAdminTUI:
         import socket
         not_alive_streak = 0
         closed_sent = False
+        last_good_url = None
+        last_launch_url = None
+
+        def query_ipc_property(prop_name):
+            import json
+            try:
+                if IS_WINDOWS:
+                    with open(self.ipc_path, 'r+') as f:
+                        f.write(json.dumps({"command": ["get_property", prop_name]}) + "\n")
+                        f.flush()
+                        response = f.readline()
+                        if not response:
+                            return None
+                        return json.loads(response).get("data")
+
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.settimeout(0.5)
+                s.connect(self.ipc_path)
+                s.sendall((json.dumps({"command": ["get_property", prop_name]}) + "\n").encode())
+                data = b""
+                while b"\n" not in data:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                s.close()
+                first_line = data.decode(errors="ignore").split("\n", 1)[0]
+                if not first_line:
+                    return None
+                return json.loads(first_line).get("data")
+            except Exception:
+                return None
         
         while self.running and not self.ws:
             await asyncio.sleep(1)
@@ -639,65 +680,48 @@ class PartyAdminTUI:
                 current_url = None
                 current_title = None
                 mpv_alive = False
-                
-                # IPC get property is synchronous for simplicity here
-                def query_mpv():
-                    import json
-                    nonlocal pause_state, time_pos, current_url, current_title, mpv_alive
-                    try:
-                        if IS_WINDOWS:
-                            # Read win32 pipe
-                            with open(self.ipc_path, 'r+') as f:
-                                # Send multiple property requests and read them back
-                                f.write(json.dumps({"command": ["get_property", "pause"]}) + "\n")
-                                f.write(json.dumps({"command": ["get_property", "time-pos"]}) + "\n")
-                                f.write(json.dumps({"command": ["get_property", "path"]}) + "\n")
-                                f.write(json.dumps({"command": ["get_property", "media-title"]}) + "\n")
-                                f.flush()
-                                pause_state = json.loads(f.readline()).get("data", False)
-                                time_pos = json.loads(f.readline()).get("data", 0.0)
-                                current_url = json.loads(f.readline()).get("data")
-                                current_title = json.loads(f.readline()).get("data")
-                        else:
-                            # Consolidate Unix IPC property requests
-                            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                            s.settimeout(0.2)
-                            s.connect(self.ipc_path)
-                            
-                            commands = [
-                                ["get_property", "pause"],
-                                ["get_property", "time-pos"],
-                                ["get_property", "path"],
-                                ["get_property", "media-title"]
-                            ]
-                            
-                            for cmd in commands:
-                                s.sendall((json.dumps({"command": cmd}) + "\n").encode())
-                            
-                            # Read responses until we have enough newlines
-                            raw_data = b""
-                            while raw_data.count(b'\n') < len(commands):
-                                chunk = s.recv(4096)
-                                if not chunk: break
-                                raw_data += chunk
-                                    
-                            responses = raw_data.decode().split('\n')
-                            pause_state = json.loads(responses[0]).get("data", False)
-                            time_pos = json.loads(responses[1]).get("data", 0.0)
-                            current_url = json.loads(responses[2]).get("data")
-                            current_title = json.loads(responses[3]).get("data")
-                            s.close()
-                        mpv_alive = True
-                    except Exception:
-                        mpv_alive = False
-                
-                # Run query in thread to not block async loops
-                await asyncio.to_thread(query_mpv)
+
+                pause_state = query_ipc_property("pause")
+                time_pos = query_ipc_property("time-pos")
+                current_title = query_ipc_property("media-title")
+
+                playlist_url = query_ipc_property("playlist/0/filename")
+                stream_url = query_ipc_property("stream-open-filename")
+                path_url = query_ipc_property("path")
+                current_url = playlist_url or stream_url or path_url
+
+                launch_state = self._read_playback_state()
+                launch_url = launch_state.get("url") if isinstance(launch_state, dict) else None
+                if launch_url and launch_url != last_launch_url:
+                    last_launch_url = launch_url
+
+                # mpv is alive if its core properties respond; URL fields can be missing early on.
+                mpv_alive = isinstance(pause_state, bool) or isinstance(time_pos, (int, float))
+                if not isinstance(pause_state, bool):
+                    pause_state = False
+                if not isinstance(time_pos, (int, float)):
+                    time_pos = 0.0
                 
                 # Only send sync when MPV is actually running
                 # When MPV is closed (host picking new episode), send paused state to freeze clients
                 if self.ws:
-                    if mpv_alive and current_url:
+                    if mpv_alive:
+                        # Filter non-shareable/transient pseudo paths from mpv internals.
+                        if isinstance(current_url, str):
+                            lower_url = current_url.lower()
+                            bad_prefixes = ("memory://", "fd://", "edl://", "null://")
+                            if lower_url.startswith(bad_prefixes):
+                                current_url = None
+
+                        if current_url:
+                            last_good_url = current_url
+
+                        sync_url = current_url or launch_url or last_good_url
+                        if not sync_url:
+                            # No usable URL yet: skip this tick until we capture one.
+                            await asyncio.sleep(0.1)
+                            continue
+
                         not_alive_streak = 0
                         closed_sent = False
                         payload = {
@@ -705,8 +729,11 @@ class PartyAdminTUI:
                             "state": "paused" if pause_state else "playing",
                             "timestamp": time_pos
                         }
-                        if current_url: payload["url"] = current_url
-                        if current_title: payload["anime_title"] = current_title
+                        payload["url"] = sync_url
+                        if current_title:
+                            payload["anime_title"] = current_title
+                        if isinstance(launch_state, dict) and launch_state.get("provider"):
+                            payload["provider"] = launch_state.get("provider")
                         await self.ws.send(json.dumps(payload, ensure_ascii=False))
                     elif not mpv_alive:
                         # Debounce transient IPC misses to avoid flapping client players.

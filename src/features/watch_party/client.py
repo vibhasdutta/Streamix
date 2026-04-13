@@ -25,6 +25,7 @@ from shared.utils.os_detector import IS_WINDOWS
 from features.voice_chat.voice_manager import VoiceManager
 from shared.utils.logger import setup_logger
 from core.paths import SOUND_ASSETS_DIR
+from shared.media import is_network_media_url
 
 # Initialize client session logger
 logger = setup_logger("client_tui", "client_session.log")
@@ -69,6 +70,26 @@ class PartyClient:
         self.chat_limit = self.config.get("chat_history_limit", 50)
         self._last_sound_times = {}
         self._mpv_path = None
+        self._last_closed_notice_ts = 0.0
+        self._last_failed_url = None
+        self._last_failed_launch_ts = 0.0
+
+    def _can_attempt_launch(self, url, cooldown=8.0):
+        """Back off repeated launches for the same failing URL."""
+        if not url:
+            return False
+        if self._last_failed_url == url and (time.time() - self._last_failed_launch_ts) < cooldown:
+            return False
+        return True
+
+    def _mark_launch_failed(self, url):
+        self._last_failed_url = url
+        self._last_failed_launch_ts = time.time()
+
+    def _clear_launch_failure(self, url):
+        if self._last_failed_url == url:
+            self._last_failed_url = None
+            self._last_failed_launch_ts = 0.0
 
     def _append_chat(self, sender, message, ts=None):
         if not ts: ts = time.strftime("%H:%M")
@@ -267,8 +288,9 @@ class PartyClient:
                             title = playback.get('anime_title', 'Party Video')
                             timestamp = playback.get('timestamp', 0)
                             state = playback.get('state', 'paused')
+                            provider = playback.get('provider')
                             
-                            launched = self._launch_mpv(url, title, timestamp)
+                            launched = self._launch_mpv(url, title, timestamp, provider=provider)
                             if launched:
                                 self.current_video_url = url
                                 await self._wait_for_mpv_ipc_ready(timeout=4.0)
@@ -353,6 +375,17 @@ class PartyClient:
                             title = playback.get("anime_title", "Party Video")
                             timestamp = playback.get("timestamp", 0)
                             state = playback.get("state", "playing")
+                            provider = playback.get("provider")
+
+                            # Cross-device clients cannot open host-local file paths.
+                            # Keep party stable and show a helpful one-time hint.
+                            if url and not is_network_media_url(url):
+                                if self.current_video_url != url:
+                                    self.chat_history.append(
+                                        "[yellow]Host is playing a local/private path. Use an HTTP/HTTPS stream URL for cross-device sync.[/yellow]"
+                                    )
+                                self.current_video_url = url
+                                continue
                             
                             if state == "closed":
                                 if getattr(self, 'mpv_process', None):
@@ -371,17 +404,22 @@ class PartyClient:
                             needs_relaunch = (self.current_video_url != url) or process_missing
 
                             if url and needs_relaunch:
+                                if not self._can_attempt_launch(url):
+                                    continue
+
                                 if getattr(self, 'mpv_process', None):
                                     try:
                                         self.mpv_process.terminate()
                                     except:
                                         pass
-                                launched = self._launch_mpv(url, title, timestamp)
+                                launched = self._launch_mpv(url, title, timestamp, provider=provider)
                                 if launched:
                                     self.current_video_url = url
+                                    self._clear_launch_failure(url)
                                     await self._wait_for_mpv_ipc_ready(timeout=4.0)
                                 else:
                                     self.current_video_url = None
+                                    self._mark_launch_failed(url)
                                     continue
 
                             if not getattr(self, 'mpv_process', None) or self.mpv_process.poll() is not None:
@@ -447,7 +485,7 @@ class PartyClient:
         if self.ws and self.ws.state == State.OPEN:
             asyncio.create_task(self.ws.send(data))
 
-    def _launch_mpv(self, url, title, timestamp):
+    def _launch_mpv(self, url, title, timestamp, provider=None):
         from shared.media import get_mpv_path, get_streaming_headers
         mpv_path = get_mpv_path()
         if not mpv_path:
@@ -470,7 +508,7 @@ class PartyClient:
         ]
         
         # Add shared headers and optimizations
-        args.extend(get_streaming_headers(url))
+        args.extend(get_streaming_headers(url, provider))
         
         # Additional buffer optimization for shared playback
         args.extend([
@@ -800,7 +838,10 @@ class PartyClient:
                     await asyncio.sleep(0.05)
                     if self.mpv_process and self.mpv_process.poll() is not None:
                         self.mpv_process = None
-                        self.chat_history.append("[dim]Video player closed.[/dim]")
+                        now = time.time()
+                        if now - self._last_closed_notice_ts > 3.0:
+                            self.chat_history.append("[dim]Video player closed.[/dim]")
+                            self._last_closed_notice_ts = now
             
                 # Final countdown loop before closing
                 for i in range(5, 0, -1):

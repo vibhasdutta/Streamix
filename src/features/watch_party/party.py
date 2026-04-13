@@ -53,6 +53,7 @@ class WatchPartyServer:
             "url": "",
             "anime_title": "Nothing",
             "episode": "",
+            "provider": "",
             "state": "closed", # playing | paused | closed
             "timestamp": 0.0,
             "last_sync": time.time()
@@ -344,6 +345,7 @@ class WatchPartyServer:
                         "url": data.get("url", self.playback_state["url"]),
                         "anime_title": data.get("anime_title", self.playback_state["anime_title"]),
                         "episode": data.get("episode", self.playback_state["episode"]),
+                        "provider": data.get("provider", self.playback_state.get("provider", "")),
                         "timestamp": data.get("timestamp", self.playback_state["timestamp"]),
                         "state": data.get("state", self.playback_state["state"]),
                     })
@@ -607,9 +609,11 @@ def start_server_and_tunnel(room_name, host_name, max_users=10, port=9000):
         print(f"[Party] Tunnel ready: {public_url}")
         
         # 3. Save room info for the admin client to read
+        local_url = f"ws://127.0.0.1:{actual_port}"
         with open(PARTY_INFO_PATH, "w") as f:
             json.dump({
                 "url": public_url,
+                "local_url": local_url,
                 "room_name": room_name,
                 "host_name": host_name,
                 "max_users": max_users
