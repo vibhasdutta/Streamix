@@ -1,5 +1,5 @@
 import sys
-from utils.os_detector import IS_WINDOWS
+from shared.utils.os_detector import IS_WINDOWS
 
 class NonBlockingInput:
     def __init__(self):

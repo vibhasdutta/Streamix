@@ -1,12 +1,17 @@
 import asyncio
+
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
 import json
 import logging
 import time
 import hashlib
 from pyngrok import ngrok
 import websockets
-from utils.os_detector import IS_WINDOWS
-from config import get_admin_config
+from shared.utils.os_detector import IS_WINDOWS
+from core.config import get_admin_config
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -516,7 +521,7 @@ import logging
 import traceback
 from datetime import datetime
 import os
-from utils.logger import setup_logger
+from shared.utils.logger import setup_logger
 
 # Initialize centralized logger
 logger = setup_logger("party_server", "streamix_backend.log")

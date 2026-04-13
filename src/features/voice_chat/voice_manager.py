@@ -4,7 +4,7 @@ import threading
 import queue
 import zlib
 import asyncio
-from utils.logger import setup_logger
+from shared.utils.logger import setup_logger
 
 logger = setup_logger("voice_manager", "voice.log")
 

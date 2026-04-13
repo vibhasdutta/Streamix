@@ -1,4 +1,9 @@
 import asyncio
+
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
 import json
 import websockets
 from websockets.protocol import State
@@ -15,9 +20,9 @@ from rich.text import Text
 from rich.align import Align
 from rich.markup import escape
 from rich.console import Group
-from utils.os_detector import IS_WINDOWS
-from voice_manager import VoiceManager
-from utils.logger import setup_logger
+from shared.utils.os_detector import IS_WINDOWS
+from features.voice_chat.voice_manager import VoiceManager
+from shared.utils.logger import setup_logger
 
 # Initialize client session logger
 logger = setup_logger("client_tui", "client_session.log")
@@ -46,7 +51,7 @@ class PartyClient:
         self.current_video_url = None
         
         # Load persistent config
-        from config import get_client_config
+        from core.config import get_client_config
         self.config = get_client_config()
         self.volume = self.config.get("volume", 100)
         self.notifications_enabled = self.config.get("notifications", True)
@@ -110,7 +115,7 @@ class PartyClient:
         self._last_sound_time = now
         
         try:
-            from main import get_mpv_path
+            from shared.media import get_mpv_path
             mpv_path = get_mpv_path()
             if mpv_path:
                 sound_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sound_assets", filename)
@@ -187,7 +192,7 @@ class PartyClient:
             )
             
             # Start Voice Manager with persistent config
-            from config import load_config
+            from core.config import load_config
             cfg = load_config()["client"]
             mic_idx = cfg.get("mic_device_index")
             
@@ -397,7 +402,7 @@ class PartyClient:
             asyncio.create_task(self.ws.send(data))
 
     def _launch_mpv(self, url, title, timestamp):
-        from main import get_mpv_path, get_streaming_headers
+        from shared.media import get_mpv_path, get_streaming_headers
         mpv_path = get_mpv_path()
         if not mpv_path:
             self.chat_history.append("[bold red]mpv not found! Cannot sync video.[/bold red]")
@@ -521,7 +526,7 @@ class PartyClient:
                 
                 self.notifications_enabled = (val == "on")
                 # Persist to config
-                from config import update_client_config
+                from core.config import update_client_config
                 update_client_config(notifications=self.notifications_enabled)
                 
                 status = "enabled" if self.notifications_enabled else "disabled"
@@ -703,7 +708,7 @@ class PartyClient:
                             asyncio.create_task(self.broadcast_voice_state())
                     elif c == '\x0e': # Ctrl+N
                         self.notifications_enabled = not self.notifications_enabled
-                        from config import update_client_config
+                        from core.config import update_client_config
                         update_client_config(notifications=self.notifications_enabled)
                         self.chat_history.append(f"[dim]🔔 Sounds {'On' if self.notifications_enabled else 'Off'}[/dim]")
                     else:
@@ -717,7 +722,7 @@ class PartyClient:
 
     async def run(self):
         from rich import box
-        from party_input import NonBlockingInput
+        from features.watch_party.party_input import NonBlockingInput
         
         input_handler = NonBlockingInput()
         try:

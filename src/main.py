@@ -1,6 +1,7 @@
 import asyncio
 import requests
 import os
+from shared.media import get_mpv_path, get_streaming_headers
 import json
 import time
 import sys
@@ -12,7 +13,7 @@ import shutil
 import platform
 import hashlib
 from pathlib import Path
-from config import (
+from core.config import (
     load_config, 
     update_admin_config, 
     update_client_config,
@@ -33,7 +34,7 @@ from rich import box
 import questionary
 from questionary import Style as QStyle
 from contextlib import contextmanager
-from utils.os_detector import (
+from shared.utils.os_detector import (
     IS_MACOS,
     IS_WINDOWS,
     OS,
@@ -42,7 +43,7 @@ from utils.os_detector import (
     RAW_OS_VERSION,
     current_os,
 )
-from utils.logger import setup_logger
+from shared.utils.logger import setup_logger
 
 # Initialize centralized lifecycle logger
 logger = setup_logger("main_hub", "streamix_backend.log")
@@ -186,9 +187,9 @@ def stop_backend():
         else:
             # Unix-like cleanup
             # pkill returns non-zero if no process found, so ignore errors
-            subprocess.run(["pkill", "-f", "host.py"], stderr=subprocess.DEVNULL)
-            subprocess.run(["pkill", "-f", "client.py"], stderr=subprocess.DEVNULL)
-            subprocess.run(["pkill", "-f", "party.py"], stderr=subprocess.DEVNULL)
+            subprocess.run(["pkill", "-f", os.path.join(os.path.dirname(__file__), "features", "watch_party", "host.py")], stderr=subprocess.DEVNULL)
+            subprocess.run(["pkill", "-f", os.path.join(os.path.dirname(__file__), "features", "watch_party", "client.py")], stderr=subprocess.DEVNULL)
+            subprocess.run(["pkill", "-f", os.path.join(os.path.dirname(__file__), "features", "watch_party", "party.py")], stderr=subprocess.DEVNULL)
             subprocess.run(["pkill", "-9", "ngrok"], stderr=subprocess.DEVNULL)
     except Exception:
         pass
@@ -313,7 +314,7 @@ def _cleanup_party():
 
 def _open_in_new_terminal(script_name, args, title="Streamix"):
     """Open a Python script in a new terminal window. Works on macOS, Windows, and Linux."""
-    py = sys.executable
+    py = "uv"
     script = os.path.abspath(script_name)
 
     proc = None
@@ -321,13 +322,13 @@ def _open_in_new_terminal(script_name, args, title="Streamix"):
     if current_os is OS.WINDOWS:
         # Windows: open a new cmd window
         args_str = ' '.join(f'\"{a}\"' for a in args)
-        cmd = f'start "{title}" cmd /c "\"{py}\" \"{script}\" {args_str}"'
+        cmd = f'start "{title}" cmd /c "\"{py}\" run \"{script}\" {args_str}"'
         logger.info(f"[LIFECYCLE] Launching {script_name} in new Windows Terminal: {title}")
         proc = subprocess.Popen(cmd, shell=True)
 
     elif current_os is OS.MACOS:
         # macOS: open a new Terminal.app window via AppleScript
-        script_cmd = f'"{py}" "{script}"'
+        script_cmd = f'"{py}" run "{script}"'
         if args:
             script_cmd += " " + " ".join(f'"{a}"' for a in args)
         script_cmd += "; exit"
@@ -345,7 +346,7 @@ def _open_in_new_terminal(script_name, args, title="Streamix"):
                 shutil.which("alacritty") or 
                 shutil.which("xterm"))
         if term:
-            cmd_args = [term, "-e", py, script] + list(args)
+            cmd_args = [term, "-e", py, "run", script] + list(args)
             proc = subprocess.Popen(cmd_args)
         else:
             console.print("[red]Could not find a suitable terminal emulator![/red]")
@@ -396,7 +397,7 @@ def start_backend():
 
         try:
             backend_process = subprocess.Popen(
-                [sys.executable, "-m", "uvicorn", "backend:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "info"],
+                ["uv", "run", "uvicorn", "features.api_backend.backend:app", "--app-dir", os.path.dirname(__file__), "--host", "0.0.0.0", "--port", "8000", "--log-level", "info"],
                 stdout=log_file,
                 stderr=log_file
             )
@@ -433,57 +434,6 @@ def score_bar(score, max_score=100, width=20):
         color = "red"
     return f"[{color}]{'█' * filled}[/{color}][dim]{'░' * empty}[/dim] {score}/100"
 
-
-def get_mpv_path():
-    """Find mpv on the system (Linux/macOS)."""
-    cmd = shutil.which("mpv")
-    if cmd:
-        return cmd
-    possible_paths = [
-        # Local relative path
-        "./mpv.exe",
-        "bin/mpv.exe",
-        # Linux/macOS
-        "/usr/bin/mpv",
-        "/usr/local/bin/mpv",
-        "/snap/bin/mpv",
-        "/opt/homebrew/bin/mpv",
-        # Windows common paths
-        "C:\\Program Files\\mpv\\mpv.exe",
-        "C:\\Program Files\\MPV Player\\mpv.exe",
-        "C:\\mpv\\mpv.exe",
-        os.path.expanduser("~\\AppData\\Local\\Microsoft\\WindowsApps\\mpv.exe")
-    ]
-    for path in possible_paths:
-        if os.path.exists(path):
-            return path
-    return None
-
-def get_streaming_headers(url, provider=None):
-    """Generate optimal HTTP headers for a given stream URL/Provider."""
-    # Dynamic Referrer Logic
-    referrer = "https://miruro.to/" # Default
-    if "kwik.cx" in url:
-        referrer = "https://kwik.cx/"
-    elif provider and provider.lower() == "kiwi":
-        referrer = "https://kwik.cx/"
-    elif "bunny.net" in url:
-        referrer = "https://miruro.to/"
-        
-    headers = [
-        f"--referrer={referrer}",
-        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-        # Standard browser origin
-        "--http-header-fields=Origin: https://miruro.to"
-    ]
-    
-    # Global optimizations for online streams
-    optimizations = [
-        "--tls-verify=no",           # Skip verification if SNI/Certs are mismatched
-        "--cache-secs=60",           # Cache up to 60s ahead
-        "--hls-bitrate=max",         # Always aim for best HLS quality
-    ]
-    return headers + optimizations
 
 def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=False, is_live=False, quality=None, ipc_server=None, start_time=0, provider=None):
     """Platform-aware video playback using mpv exclusively.
@@ -977,9 +927,9 @@ def display_anime_details(selected_anime):
 
 def handle_audio_peripherals():
     """Menu to select and test microphone and headphones."""
-    from voice_manager import VoiceManager
+    from features.voice_chat.voice_manager import VoiceManager
     import sounddevice as sd
-    from config import update_admin_config, update_client_config, load_config
+    from core.config import update_admin_config, update_client_config, load_config
     
     while True:
         cfg = load_config()
@@ -1509,7 +1459,7 @@ def main():
                 else: update_client_config(default_username=username)
                 
                 console.print("[yellow]Connecting... a new window will open for chat.[/yellow]")
-                _open_in_new_terminal("client.py", [party_url, username], title="Streamix Client")
+                _open_in_new_terminal(os.path.join(os.path.dirname(__file__), "features", "watch_party", "client.py"), [party_url, username], title="Streamix Client")
                 console.print("[bold green]✅ Client window launched![/bold green]")
                 input("Press Enter to return to menu...")
                 view = "home"
@@ -1535,7 +1485,7 @@ def main():
                 party_log = open(os.path.join(os.path.dirname(__file__), "data", "logs", "streamix_backend.log"), "a")
                 party_log.write(f"\n--- WATCH PARTY SERVER START: {time.ctime()} ---\n")
                 party_log.flush()
-                party_proc = subprocess.Popen([sys.executable, "party.py", room_name, host_name, max_users], stdout=party_log, stderr=party_log)
+                party_proc = subprocess.Popen(["uv", "run", os.path.join(os.path.dirname(__file__), "features", "watch_party", "party.py"), room_name, host_name, max_users], stdout=party_log, stderr=party_log)
                 active_subprocesses.append(party_proc)
                 
                 party_info_path = os.path.join(os.path.dirname(__file__), "data", "party_info.json")
@@ -1561,7 +1511,7 @@ def main():
                             console.print(Align.center("[dim italic](Link automatically copied to your clipboard!)[/dim italic]"))
                         except: pass
                     
-                    _open_in_new_terminal("host.py", [host_name, ipc_server_path or "", info['url']], title="Streamix Host")
+                    _open_in_new_terminal(os.path.join(os.path.dirname(__file__), "features", "watch_party", "host.py"), [host_name, ipc_server_path or "", info['url']], title="Streamix Host")
                     
                     console.print("[dim]Admin console opened in a new window.[/dim]")
                     party_active = True

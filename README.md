@@ -71,7 +71,7 @@ To host a party, you need an [ngrok](https://ngrok.com/) account for tunneling.
 
 Simply launch the main dashboard:
 ```bash
-uv run main.py
+uv run src/main.py
 ```
 
 ---

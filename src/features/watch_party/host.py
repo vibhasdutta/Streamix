@@ -1,4 +1,9 @@
 import asyncio
+
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
 import json
 import websockets
 from websockets.protocol import State
@@ -15,9 +20,9 @@ from rich.text import Text
 from rich.align import Align
 from rich.markup import escape
 from rich.console import Group
-from utils.os_detector import IS_WINDOWS
-from voice_manager import VoiceManager
-from utils.logger import setup_logger
+from shared.utils.os_detector import IS_WINDOWS
+from features.voice_chat.voice_manager import VoiceManager
+from shared.utils.logger import setup_logger
 
 # Initialize host session logger
 logger = setup_logger("host_tui", "host_session.log")
@@ -46,7 +51,7 @@ class PartyAdminTUI:
         self.local_deafened = set()
         
         # Load persistent config
-        from config import get_admin_config
+        from core.config import get_admin_config
         self.config = get_admin_config()
         self.volume = self.config.get("volume", 100)
         self.notifications_enabled = self.config.get("notifications", True)
@@ -80,7 +85,7 @@ class PartyAdminTUI:
         if not self.notifications_enabled:
             return
         try:
-            from main import get_mpv_path
+            from shared.media import get_mpv_path
             mpv_path = get_mpv_path()
             if mpv_path:
                 sound_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sound_assests", "notification.mp3")
@@ -119,7 +124,7 @@ class PartyAdminTUI:
         
         try:
             if not self._mpv_path:
-                from main import get_mpv_path
+                from shared.media import get_mpv_path
                 self._mpv_path = get_mpv_path()
             
             if self._mpv_path:
@@ -181,7 +186,7 @@ class PartyAdminTUI:
             await self.ws.send(json.dumps({"type": "join", "name": self.username, "role": "host"}))
 
             # Start Voice Manager with persistent config
-            from config import load_config
+            from core.config import load_config
             cfg = load_config()["admin"]
             mic_idx = cfg.get("mic_device_index")
             
@@ -393,7 +398,7 @@ class PartyAdminTUI:
                 
                 self.notifications_enabled = (val == "on")
                 # Persist to config
-                from config import update_admin_config
+                from core.config import update_admin_config
                 update_admin_config(notifications=self.notifications_enabled)
                 
                 status = "enabled" if self.notifications_enabled else "disabled"
@@ -587,7 +592,7 @@ class PartyAdminTUI:
                             asyncio.create_task(self.broadcast_voice_state())
                     elif c == '\x0e': # Ctrl+N
                         self.notifications_enabled = not self.notifications_enabled
-                        from config import update_admin_config
+                        from core.config import update_admin_config
                         update_admin_config(notifications=self.notifications_enabled)
                         self.chat_history.append(f"[dim]🔔 Sounds {'On' if self.notifications_enabled else 'Off'}[/dim]")
                     else:
@@ -702,7 +707,7 @@ class PartyAdminTUI:
 
     async def run(self):
         from rich import box
-        from party_input import NonBlockingInput
+        from features.watch_party.party_input import NonBlockingInput
         
         input_handler = NonBlockingInput()
         try:
