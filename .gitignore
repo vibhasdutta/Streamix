@@ -14,3 +14,5 @@ wheels/
 uv.lock
 data/
 scripts/
+.claude/
+graphify-out/

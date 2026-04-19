@@ -26,6 +26,7 @@ from features.voice_chat.voice_manager import VoiceManager
 from shared.utils.logger import setup_logger
 from core.paths import SOUND_ASSETS_DIR
 from shared.media import is_network_media_url
+from shared.discord_rpc import rpc_manager
 
 # Initialize client session logger
 logger = setup_logger("client_tui", "client_session.log")
@@ -41,6 +42,7 @@ class PartyClient:
         self.running = True
         
         self.room_name = "Joining..."
+        self.host_name = None
         self.chat_history = []
         self.users = []
         self.input_text = ""
@@ -280,9 +282,15 @@ class PartyClient:
                     
                     if mt == "room_state":
                         self.room_name = data.get("room_name", "Party Room")
+                        self.host_name = data.get("host_name")
                         playback = data.get("playback", {})
                         self.chat_history.append(f"[bold green]Joined room '{self.room_name}'.[/bold green]")
-                        
+                        rpc_manager.set_in_party(
+                            room_name=self.room_name,
+                            member_count=len(self.users) if self.users else 1,
+                            host_name=self.host_name,
+                        )
+
                         # Launch mpv
                         if playback and playback.get('url'):
                             url = playback.get('url')
@@ -401,6 +409,11 @@ class PartyClient:
                                     self.mpv_process = None
                                 self.current_video_url = None
                                 self.current_playback_state = "closed"
+                                rpc_manager.set_in_party(
+                                    room_name=self.room_name,
+                                    member_count=len(self.users) if self.users else 1,
+                                    host_name=self.host_name,
+                                )
                                 continue  # Skip the rest of the sync logic
                             
                             # Auto-launch or restart mpv when needed.
@@ -439,6 +452,13 @@ class PartyClient:
                             # Sync mpv (sync is never locally filtered — host controls playback)
                             await self._send_mpv_command(["set_property", "pause", state == "paused"])
                             client_time = await asyncio.to_thread(self._get_mpv_property_sync, "time-pos")
+                            rpc_manager.set_watching_party(
+                                title=title,
+                                party_name=self.room_name,
+                                member_count=len(self.users) if self.users else 1,
+                                runtime_pos=client_time,
+                                host_name=self.host_name,
+                            )
                             
                             # Only seek if we're out of sync by more than 0.8 seconds (tighter sync)
                             # Larger thresholds (e.g. 2.0s) lead to noticeable desynchronization

@@ -1,4 +1,5 @@
 from shared.utils.logger import install_asyncio_exception_handler, setup_logger
+from shared.discord_rpc import rpc_manager
 import asyncio
 import requests
 import os
@@ -132,6 +133,22 @@ def status_after(text, center=False):
     with Live(display, transient=True, refresh_per_second=10):
         yield
 
+_mpv_pids: list = []
+
+def _kill_proc_tree(pid: int):
+    """Kill a process and all descendants by PID. Uses taskkill /T on Windows."""
+    try:
+        if IS_WINDOWS:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            try:
+                os.killpg(os.getpgid(pid), __import__('signal').SIGKILL)
+            except Exception:
+                os.kill(pid, __import__('signal').SIGKILL)
+    except Exception:
+        pass
+
 _is_cleaning_up = False
 def stop_backend(stop_party=True):
     """Cleanup Streamix backend resources.
@@ -168,41 +185,22 @@ def stop_backend(stop_party=True):
     for proc in active_subprocesses:
         try:
             if (not stop_party) and party_proc and proc is party_proc:
-                # Keep detached party room alive when launcher exits.
                 continue
             if proc.poll() is None:
                 logger.info(f"[LIFECYCLE] Terminating subprocess (PID: {proc.pid})")
-                proc.terminate()
-                proc.wait(timeout=2)
-        except Exception:
-            try:
-                logger.warning(f"[LIFECYCLE] Force-killing subprocess (PID: {proc.pid})")
-                proc.kill()
-            except:
-                pass
-    active_subprocesses.clear()
-    logger.info("[LIFECYCLE] System cleanup completed.")
-            
-    # Kill party Python processes and ngrok only when explicitly requested.
-    if stop_party:
-        try:
-            import signal
-            if IS_WINDOWS:
-                # Use taskkill but catch any issues
-                subprocess.run(["taskkill", "/F", "/IM", "ngrok.exe", "/T"], 
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            else:
-                # Unix-like cleanup: terminate party server first so host/client
-                # receive websocket closure and can show their session countdown.
-                subprocess.run(["pkill", "-f", os.path.join(os.path.dirname(__file__), "features", "watch_party", "party.py")], stderr=subprocess.DEVNULL)
-                # Allow client/host UIs to process close event and exit gracefully.
-                time.sleep(3.5)
-                # Fallback cleanup for stragglers only.
-                subprocess.run(["pkill", "-f", os.path.join(os.path.dirname(__file__), "features", "watch_party", "host.py")], stderr=subprocess.DEVNULL)
-                subprocess.run(["pkill", "-f", os.path.join(os.path.dirname(__file__), "features", "watch_party", "client.py")], stderr=subprocess.DEVNULL)
-                subprocess.run(["pkill", "-9", "ngrok"], stderr=subprocess.DEVNULL)
+                _kill_proc_tree(proc.pid)
         except Exception:
             pass
+    active_subprocesses.clear()
+
+    if stop_party:
+        global _mpv_pids
+        for pid in list(_mpv_pids):
+            try: _kill_proc_tree(pid)
+            except: pass
+        _mpv_pids.clear()
+
+    logger.info("[LIFECYCLE] System cleanup completed.")
     
     # Cleanup party info file only when room teardown is requested.
     if stop_party:
@@ -226,53 +224,27 @@ def _cleanup_party():
     """Kill all party-related processes (server, ngrok, admin/client terminals) without touching the backend."""
     global active_subprocesses
     
-    # 1. Kill tracked subprocesses first (Safest way)
+    # Kill tracked subprocesses by PID tree
     for proc in active_subprocesses:
         try:
             if proc.poll() is None:
                 logger.info(f"[LIFECYCLE] Terminating session subprocess (PID: {proc.pid})")
-                proc.terminate()
-                try: proc.wait(timeout=1.5)
-                except subprocess.TimeoutExpired: proc.kill()
+                _kill_proc_tree(proc.pid)
         except: pass
     active_subprocesses.clear()
 
-    # 2. Force-kill known external dependencies (ngrok)
-    try:
-        if IS_WINDOWS:
-            # Only kill ngrok on windows as a fallback
-            subprocess.run(["taskkill", "/F", "/IM", "ngrok.exe", "/T"], 
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        else:
-            os.system("pkill -9 ngrok >/dev/null 2>&1")
-    except:
-        pass
+    # Kill tracked mpv PIDs
+    for pid in list(_mpv_pids):
+        try: _kill_proc_tree(pid)
+        except: pass
+    _mpv_pids.clear()
     
-    # 3. Cleanup state files
-    try:
-        if PARTY_INFO_PATH.exists():
-            PARTY_INFO_PATH.unlink()
-    except:
-        pass
-
-    try:
-        if PLAYBACK_STATE_PATH.exists():
-            PLAYBACK_STATE_PATH.unlink()
-    except:
-        pass
-    
-    # Remove party_info.json so the next host doesn't read stale data
-    try:
-        if PARTY_INFO_PATH.exists():
-            PARTY_INFO_PATH.unlink()
-    except Exception:
-        pass
-
-    try:
-        if PLAYBACK_STATE_PATH.exists():
-            PLAYBACK_STATE_PATH.unlink()
-    except Exception:
-        pass
+    # Cleanup state files
+    for p in (PARTY_INFO_PATH, PLAYBACK_STATE_PATH):
+        try:
+            if p.exists(): p.unlink()
+        except Exception:
+            pass
     
     # Cleanup IPC sockets
     if not IS_WINDOWS:
@@ -302,9 +274,10 @@ def _open_in_new_terminal(script_name, args, title="Streamix"):
         command = subprocess.list2cmdline(child_argv)
         logger.info(f"[LIFECYCLE] Launching {script_name} in new Windows Terminal: {title}")
         create_new_console = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+        safe_title = title.replace("&", "^&").replace("|", "^|").replace("<", "^<").replace(">", "^>")
 
         proc = subprocess.Popen(
-            ["cmd", "/k", command],
+            ["cmd", "/k", f"title {safe_title} & {command}"],
             creationflags=create_new_console,
             cwd=project_root,
         )
@@ -335,6 +308,7 @@ def _open_in_new_terminal(script_name, args, title="Streamix"):
             if terminal_name == "gnome-terminal":
                 cmd_args = [
                     term,
+                    f"--title={title}",
                     "--working-directory",
                     project_root,
                     "--",
@@ -345,6 +319,7 @@ def _open_in_new_terminal(script_name, args, title="Streamix"):
             elif terminal_name == "konsole":
                 cmd_args = [
                     term,
+                    "--title", title,
                     "--workdir",
                     project_root,
                     "-e",
@@ -355,6 +330,7 @@ def _open_in_new_terminal(script_name, args, title="Streamix"):
             elif terminal_name == "alacritty":
                 cmd_args = [
                     term,
+                    "--title", title,
                     "--working-directory",
                     project_root,
                     "-e",
@@ -365,6 +341,7 @@ def _open_in_new_terminal(script_name, args, title="Streamix"):
             elif terminal_name == "xterm":
                 cmd_args = [
                     term,
+                    "-title", title,
                     "-e",
                     "bash",
                     "-lc",
@@ -467,7 +444,7 @@ def score_bar(score, max_score=100, width=20):
     return f"[{color}]{'█' * filled}[/{color}][dim]{'░' * empty}[/dim] {score}/100"
 
 
-def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=False, is_live=False, quality=None, ipc_server=None, start_time=0, provider=None):
+def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=False, is_live=False, quality=None, ipc_server=None, start_time=0, provider=None, total_eps=None, anime_meta=None):
     """Platform-aware video playback using mpv exclusively.
     """
     mpv_path = get_mpv_path()
@@ -482,6 +459,8 @@ def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=Fal
                     "url": url,
                     "anime_title": anime_title,
                     "episode": episode_num,
+                    "total_eps": total_eps,
+                    "anime_meta": anime_meta or {},
                     "start_time": start_time,
                     "provider": provider,
                     "updated_at": time.time(),
@@ -551,7 +530,8 @@ def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=Fal
         try:
             if ipc_server and party_proc:
                 mpv_process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                logger.info(f"[LIFECYCLE] Solo Player launched (PID: {mpv_process.pid}) for URL: {url}")
+                _mpv_pids.append(mpv_process.pid)
+                logger.info(f"[LIFECYCLE] Party Player launched (PID: {mpv_process.pid}) for URL: {url}")
                 import threading
                 def _party_watchdog():
                     while mpv_process.poll() is None:
@@ -560,22 +540,24 @@ def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=Fal
                             except: pass
                             return
                         time.sleep(0.5)
-                
+
                 watcher = threading.Thread(target=_party_watchdog, daemon=True)
                 watcher.start()
                 mpv_process.wait()
-                return 0.0, 0.0  # Party mode doesn't store local resume progress natively yet
+                try: _mpv_pids.remove(mpv_process.pid)
+                except: pass
+                return 0.0, 0.0
             else:
                 # Solo mode: Capture stdout to precisely track the exit position
                 mpv_process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding="utf-8")
-                logger.info(f"[LIFECYCLE] Party Player launched (PID: {mpv_process.pid}) for URL: {url}")
-                
+                _mpv_pids.append(mpv_process.pid)
+                logger.info(f"[LIFECYCLE] Solo Player launched (PID: {mpv_process.pid}) for URL: {url}")
+
                 last_pos = 0.0
                 duration = 0.0
                 for line in mpv_process.stdout:
                     if "STREAMIX_POS=" in line:
                         try:
-                            # Parse out the float values. Format: STREAMIX_POS=pos|dur
                             val = line.split("STREAMIX_POS=")[1].strip()
                             parts = val.split("|")
                             if parts[0] and parts[0] != '(unavailable)':
@@ -584,8 +566,19 @@ def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=Fal
                                 duration = float(parts[1])
                         except:
                             pass
-                            
+                        rpc_manager.set_watching_solo(
+                            title=anime_title,
+                            episode=episode_num,
+                            total_eps=total_eps,
+                            runtime_pos=last_pos,
+                            runtime_duration=duration,
+                            anime_meta=anime_meta
+                        )
+
                 mpv_process.wait()
+                try: _mpv_pids.remove(mpv_process.pid)
+                except: pass
+                rpc_manager.set_browsing()
                 
             return last_pos, duration
             
@@ -970,7 +963,14 @@ def display_anime_details(selected_anime):
     ).ask()
     
     if action_val == "watch":
-        return "watch", (t_str, anilist_id)
+        studios = [s.get("name") for s in selected_anime.get("studios", {}).get("nodes", []) if s.get("isAnimationStudio")]
+        anime_meta = {
+            "cover_url": selected_anime.get("coverImage", {}).get("large"),
+            "score": selected_anime.get("averageScore"),
+            "genres": (selected_anime.get("genres") or [])[:2],
+            "studio": studios[0] if studios else None,
+        }
+        return "watch", (t_str, anilist_id, anime_meta)
     elif action_val == "characters":
         display_characters(anilist_id, t_str)
         return display_anime_details(selected_anime) # Loop back
@@ -1070,7 +1070,7 @@ def handle_audio_peripherals():
             vm = VoiceManager(loop, output_device=None)
             vm.play_test_sound()
 
-def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None, ipc_server_path=None):
+def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None, ipc_server_path=None, anime_meta=None):
     with status_after(f"[yellow]🔍 Fetching providers for {t_str}[/yellow]"):
         try:
             # Episodes should have low TTL (1h) so airing anime get new episodes quickly
@@ -1267,13 +1267,15 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None,
                 save_cache(t_str, anilist_id, session_provider, session_category, ep_num, total_eps=len(ep_list), status="Watching", mark_watched=False, resume_time=resume_time)
                 
                 final_time, dur = play_video(
-                    selected_url, 
-                    anime_title=t_str, 
-                    episode_num=ep_num, 
-                    quality=selected_stream.get('quality'), 
-                    ipc_server=ipc_server_path, 
+                    selected_url,
+                    anime_title=t_str,
+                    episode_num=ep_num,
+                    quality=selected_stream.get('quality'),
+                    ipc_server=ipc_server_path,
                     start_time=resume_time,
-                    provider=session_provider
+                    provider=session_provider,
+                    total_eps=len(ep_list) if ep_list else None,
+                    anime_meta=anime_meta
                 )
                 
                 # Check if this was the last episode
@@ -1431,18 +1433,20 @@ def main():
     # Persistent state across views
     search_history = []
     view = "home" # "home", "party", "dashboard"
-    
+
     # Session state
     global party_proc
     party_active = False
     is_host = True
-    
+
     party_proc = None
     ipc_server_path = None
 
     while True:
         # ─── VIEW: HOME ───
         if view == "home":
+            if not party_active:
+                rpc_manager.set_browsing()
             console.clear()
             console.rule(f"[bold cyan]✨ {PROJECT_NAME} ✨[/bold cyan]", style="cyan")
             console.print(Align.center(f"[dim]v{VERSION}  |  Choose Your Playback Mode[/dim]"))
@@ -1466,6 +1470,8 @@ def main():
             
             if mode == "solo":
                 party_active = False
+                ipc_server_path = None
+                rpc_manager.set_browsing()
                 view = "dashboard"
             elif mode == "party":
                 view = "party"
@@ -1515,7 +1521,7 @@ def main():
                 else: update_client_config(default_username=username)
                 
                 console.print("[yellow]Connecting... a new window will open for chat.[/yellow]")
-                _open_in_new_terminal(os.path.join(os.path.dirname(__file__), "features", "watch_party", "client.py"), [party_url, username], title="Streamix Client")
+                _open_in_new_terminal(os.path.join(os.path.dirname(__file__), "features", "watch_party", "client.py"), [party_url, username], title=f"Streamix - {username} (Party Client)")
                 console.print("[bold green]✅ Client window launched![/bold green]")
                 input("Press Enter to return to menu...")
                 view = "home"
@@ -1570,15 +1576,18 @@ def main():
                     _open_in_new_terminal(
                         os.path.join(os.path.dirname(__file__), "features", "watch_party", "host.py"),
                         [host_name, ipc_server_path or "", host_ws_url],
-                        title="Streamix Host",
+                        title=f"Streamix - {info.get('room_name', 'Party')} (Host: {host_name})",
                     )
                     
                     console.print("[dim]Admin console opened in a new window.[/dim]")
+                    rpc_manager.clear_presence()
                     party_active = True
                     is_host = True
                 else:
                     console.print("[red]❌ Failed to start party server. Check logs.[/red]")
                     if party_proc: party_proc.terminate()
+                    ipc_server_path = None
+                    rpc_manager.set_browsing()
                     time.sleep(2)
                     continue
                 
@@ -1593,6 +1602,8 @@ def main():
                 _cleanup_party()
                 party_active = False
                 party_active_flag.clear()
+                ipc_server_path = None
+                rpc_manager.set_browsing()
                 time.sleep(1)
                 view = "home"
                 continue
@@ -1601,6 +1612,7 @@ def main():
                 party_active_flag.set()
             else:
                 party_active_flag.clear()
+                rpc_manager.set_browsing()
 
             console.clear()
             console.print()
@@ -1644,6 +1656,8 @@ def main():
                 _cleanup_party()
                 party_active = False
                 party_active_flag.clear()
+                ipc_server_path = None
+                rpc_manager.set_browsing()
                 view = "home"
                 continue
 
@@ -1712,7 +1726,9 @@ def main():
                 while selected_anime:
                     action, payload = display_anime_details(selected_anime)
                     if action == "watch":
-                        handle_episode_flow(payload[1], payload[0], ipc_server_path=ipc_server_path)
+                        handle_episode_flow(payload[1], payload[0], anime_meta=payload[2] if len(payload) > 2 else None, ipc_server_path=ipc_server_path)
+                        if not party_active:
+                            rpc_manager.set_browsing()
                         break
                     elif action == "relation":
                         selected_anime = payload
@@ -1726,13 +1742,15 @@ def main():
                         data = fetch_json(f"{API_BASE}/{choice}", ttl_hours=2 if choice == 'recent' else 6)
                         results = data.get("results", [])
                     except: results = []
-                
+
                 if results:
                     selected_anime = show_anime_grid(results)
                     while selected_anime:
                         action, payload = display_anime_details(selected_anime)
                         if action == "watch":
-                            handle_episode_flow(payload[1], payload[0], ipc_server_path=ipc_server_path)
+                            handle_episode_flow(payload[1], payload[0], anime_meta=payload[2] if len(payload) > 2 else None, ipc_server_path=ipc_server_path)
+                            if not party_active:
+                                rpc_manager.set_browsing()
                             break
                         elif action == "relation":
                             selected_anime = payload
@@ -1750,17 +1768,20 @@ def main():
                     ep = item.get("last_watched_ep", "?")
                     h_opts.append(questionary.Choice(f" {idx:>2} | {_trunc(title, 35):<37} | Ep {ep}", value=item))
                 h_opts.append(questionary.Separator()); h_opts.append(questionary.Choice("  🔙  Back", value="back"))
-                
+
                 sel_item = questionary.select("Resume watching:", choices=h_opts, style=QSTYLE).ask()
                 if sel_item == "back" or sel_item is None: continue
-                
+
                 mock_a = {"id": sel_item["anilist_id"], "title": {"english": sel_item["title"]}}
                 while mock_a:
                     action, payload = display_anime_details(mock_a)
                     if action == "watch":
-                        handle_episode_flow(payload[1], payload[0], 
+                        handle_episode_flow(payload[1], payload[0],
                                             pre_provider=sel_item.get("provider") if mock_a["id"] == sel_item["anilist_id"] else None,
+                                            anime_meta=payload[2] if len(payload) > 2 else None,
                                             ipc_server_path=ipc_server_path)
+                        if not party_active:
+                            rpc_manager.set_browsing()
                         break
                     elif action == "relation": mock_a = payload
                     else: break
@@ -1770,13 +1791,26 @@ def main():
 
 if __name__ == "__main__":
     import signal
-    
+
     def _signal_cleanup(signum, frame):
-        """Handle SIGTERM/SIGINT for clean shutdown."""
         raise KeyboardInterrupt
-    
+
     signal.signal(signal.SIGTERM, _signal_cleanup)
     signal.signal(signal.SIGINT, _signal_cleanup)
+
+    # Windows: catch console close / X button / logoff events
+    if IS_WINDOWS:
+        try:
+            import win32api
+            def _win_console_handler(event):
+                stop_backend(stop_party=True)
+                return False
+            win32api.SetConsoleCtrlHandler(_win_console_handler, True)
+        except ImportError:
+            pass  # pywin32 not installed, SIGTERM fallback is enough
+
+    # Ensure tracked processes are killed even on abnormal exit
+    atexit.register(lambda: stop_backend(stop_party=party_active_flag.is_set()))
     
     try:
         start_backend()

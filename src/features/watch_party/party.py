@@ -250,6 +250,7 @@ class WatchPartyServer:
                     {
                         "type": "room_state",
                         "room_name": self.room_name,
+                        "host_name": self.host_name,
                         "playback": self.playback_state,
                     },
                     ensure_ascii=False,

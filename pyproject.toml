@@ -9,6 +9,7 @@ dependencies = [
     "httpx>=0.28.1",
     "numpy>=2.4.4",
     "pyngrok>=8.0.0",
+    "pypresence>=4.6.1",
     "python-dotenv>=1.2.2",
     "questionary>=2.1.1",
     "requests>=2.33.1",

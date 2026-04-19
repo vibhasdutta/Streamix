@@ -21,6 +21,7 @@ from rich.align import Align
 from rich.markup import escape
 from rich.console import Group
 from shared.utils.os_detector import IS_WINDOWS
+from shared.discord_rpc import rpc_manager
 from features.voice_chat.voice_manager import VoiceManager
 from shared.utils.logger import setup_logger
 from core.paths import PARTY_INFO_PATH, PLAYBACK_STATE_PATH
@@ -68,13 +69,17 @@ class PartyAdminTUI:
         self.chat_limit = self.config.get("chat_history_limit", 50)
         self._mpv_path = None # Cache for mpv path
         self._last_sound_times = {}
-        
+        self.party_max = 10
+        self.host_name = None
+
         # Try to load info from file
         try:
             with open(PARTY_INFO_PATH, "r") as f:
                 info = json.load(f)
                 self.room_url = info.get("url", "ws://localhost:9000")
                 self.room_name = info.get("room_name", "Party")
+                self.party_max = info.get("max_users", 10)
+                self.host_name = info.get("host_name")
         except:
             pass
 
@@ -181,6 +186,12 @@ class PartyAdminTUI:
                     self.chat_history.append(f"[dim]Connecting to {target_display} (attempt {attempt}/{max_retries})...[/dim]")
                     self.ws = await websockets.connect(self.ws_url, **connect_kwargs)
                     logger.info(f"[LIFECYCLE] Connected to party server at {self.ws_url}")
+                    rpc_manager.set_in_party(
+                        room_name=self.room_name,
+                        member_count=len(self.users) if self.users else 1,
+                        party_max=self.party_max,
+                        host_name=self.host_name,
+                    )
                     break
                 except (ConnectionRefusedError, OSError) as e:
                     import socket
@@ -739,6 +750,19 @@ class PartyAdminTUI:
                         if isinstance(launch_state, dict) and launch_state.get("provider"):
                             payload["provider"] = launch_state.get("provider")
                         await self.ws.send(json.dumps(payload, ensure_ascii=False))
+                        duration = query_ipc_property("duration")
+                        rpc_manager.set_watching_party(
+                            title=(launch_state.get("anime_title") if isinstance(launch_state, dict) else None) or current_title or "Anime",
+                            episode=launch_state.get("episode", "?") if isinstance(launch_state, dict) else "?",
+                            total_eps=launch_state.get("total_eps") if isinstance(launch_state, dict) else None,
+                            party_name=self.room_name,
+                            member_count=len(self.users) if self.users else 1,
+                            party_max=self.party_max,
+                            runtime_pos=time_pos,
+                            runtime_duration=duration,
+                            anime_meta=launch_state.get("anime_meta") if isinstance(launch_state, dict) else None,
+                            host_name=self.host_name,
+                        )
                     elif not mpv_alive:
                         # Debounce transient IPC misses to avoid flapping client players.
                         not_alive_streak += 1
@@ -750,6 +774,11 @@ class PartyAdminTUI:
                                 "timestamp": 0
                             }))
                             closed_sent = True
+                            rpc_manager.set_in_party(
+                                room_name=self.room_name,
+                                member_count=len(self.users) if self.users else 1,
+                                party_max=self.party_max,
+                            )
                     
             except Exception:
                 pass
