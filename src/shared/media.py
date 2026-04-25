@@ -18,16 +18,21 @@ def get_mpv_path():
         # Local relative path
         "./mpv.exe",
         "bin/mpv.exe",
-        # Linux/macOS
-        "/usr/bin/mpv",
-        "/usr/local/bin/mpv",
-        "/snap/bin/mpv",
-        "/opt/homebrew/bin/mpv",
-        # Windows common paths
+        # Windows — Scoop (most common modern install)
+        os.path.join(os.path.expanduser("~"), "scoop", "apps", "mpv", "current", "mpv.exe"),
+        os.path.join("C:\\", "ProgramData", "scoop", "apps", "mpv", "current", "mpv.exe"),
+        # Windows — common manual installs
         "C:\\Program Files\\mpv\\mpv.exe",
         "C:\\Program Files\\MPV Player\\mpv.exe",
         "C:\\mpv\\mpv.exe",
-        os.path.expanduser("~\\AppData\\Local\\Microsoft\\WindowsApps\\mpv.exe")
+        os.path.expanduser("~\\AppData\\Local\\Microsoft\\WindowsApps\\mpv.exe"),
+        # macOS
+        "/opt/homebrew/bin/mpv",   # Homebrew ARM (Apple Silicon)
+        "/usr/local/bin/mpv",      # Homebrew Intel
+        "/opt/local/bin/mpv",      # MacPorts
+        # Linux
+        "/usr/bin/mpv",
+        "/snap/bin/mpv",
     ]
     for path in possible_paths:
         if os.path.exists(path):

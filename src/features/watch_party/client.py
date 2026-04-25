@@ -41,7 +41,7 @@ class PartyClient:
         self.ws = None
         self.running = True
         
-        self.room_name = "Joining..."
+        self.room_name = "Joining"
         self.host_name = None
         self.chat_history = []
         self.users = []
@@ -215,7 +215,7 @@ class PartyClient:
                     if len(target_display) > 40:
                         target_display = target_display[:37] + "..."
                         
-                    self.chat_history.append(f"[dim]Connecting to {target_display} (attempt {attempt}/{max_retries})...[/dim]")
+                    self.chat_history.append(f"[dim]Connecting to {target_display} (attempt {attempt}/{max_retries})[/dim]")
                     self.ws = await websockets.connect(self.ws_url, **connect_kwargs)
                     logger.info(f"[LIFECYCLE] Connected to party server at {self.ws_url}")
                     break
@@ -230,7 +230,7 @@ class PartyClient:
                         error_hint = str(e)
                         
                     if attempt < max_retries:
-                        self.chat_history.append(f"[dim]Could not reach server, retrying in {retry_delay:.0f}s... ([red]{error_hint}[/red])[/dim]")
+                        self.chat_history.append(f"[dim]Could not reach server, retrying in {retry_delay:.0f}s ([red]{error_hint}[/red])[/dim]")
                         await asyncio.sleep(retry_delay)
                         retry_delay = min(retry_delay * 2, 15.0)
                     else:
@@ -265,6 +265,12 @@ class PartyClient:
                         hash_len = int(message[0])
                         sender_hash = message[1:1+hash_len].decode('utf-8')
                         audio_payload = message[1+hash_len:]
+                        
+                        # Track speaking state locally for UI indicator
+                        for u in self.users:
+                            if u.get('hash_id') == sender_hash:
+                                u['last_spoke'] = time.time()
+                                break
                         
                         # Apply Local Mute/Deafen filter using Hash-ID
                         if sender_hash in self.local_muted or sender_hash in self.local_deafened:
@@ -488,12 +494,12 @@ class PartyClient:
             else:
                 self.chat_history.append(f"[bold red]Connection rejected (HTTP {e.response.status_code}).[/bold red]")
             
-            self.chat_history.append(f"[dim]This window will close in 5 seconds...[/dim]")
+            self.chat_history.append(f"[dim]This window will close in 5 seconds[/dim]")
             self.running = False
             await asyncio.sleep(5)
         except websockets.exceptions.ConnectionClosed as e:
             self.chat_history.append(f"[bold red]Connection lost: {e.reason if e.reason else 'Host ended the session'}[/bold red]")
-            self.chat_history.append(f"[bold red]This terminal will close automatically in 3 seconds...[/bold red]")
+            self.chat_history.append(f"[bold red]This terminal will close automatically in 3 seconds[/bold red]")
             self.current_video_url = None
             self.current_playback_state = "closed"
             self.running = False
@@ -554,7 +560,7 @@ class PartyClient:
             self.mpv_process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             logger.info(f"[LIFECYCLE] MPV process launched (PID: {self.mpv_process.pid}) for URL: {url}")
             if self.mpv_process.poll() is not None:
-                self.chat_history.append("[bold red]Player exited immediately. Retrying on next sync...[/bold red]")
+                self.chat_history.append("[bold red]Player exited immediately. Retrying on next sync[/bold red]")
                 self.mpv_process = None
                 return False
             return True
@@ -636,7 +642,7 @@ class PartyClient:
                 and getattr(self, 'mpv_process', None) is None
                 and getattr(self, 'current_playback_state', 'closed') in ("playing", "paused")
             ):
-                self.chat_history.append("[dim italic]Re-joining the video stream...[/dim italic]")
+                self.chat_history.append("[dim italic]Re-joining the video stream[/dim italic]")
                 # Timestamp 0 will be fixed instantly on the next sync tick from the host
                 self._launch_mpv(self.current_video_url, "Party Video", 0)
             else:
@@ -732,17 +738,27 @@ class PartyClient:
         for u in self.users:
             name = u.get('name', '?')
             is_host = u.get('role') == 'host'
+            is_self = u.get('name') == self.username
             icon = "👑" if is_host else ("🟢" if u.get('online') else "🔴")
             
             # Voice / Audio Icons (Discord style)
             mic_part = ""
             def_part = ""
             
+            # For own entry, use local state (instant update, no server round-trip)
+            # For others, combine admin-mute and self-mute from server data
+            if is_self:
+                user_muted = self.mic_muted
+                user_deafened = self.speaker_muted
+            else:
+                user_muted = u.get('muted', False) or u.get('local_muted', False)
+                user_deafened = u.get('deafened', False) or u.get('local_deafened', False)
+            
             # Mic logic
             is_speaking = (time.time() - u.get('last_spoke', 0)) < 0.8
-            if u.get('muted'): # Global
+            if user_muted:
                 mic_part = "[red]🔇[/red]"
-            elif u.get('hash_id') in self.local_muted: # Local
+            elif u.get('hash_id') in self.local_muted: # Local mute by viewer
                 mic_part = "[dim]🔇[/dim]"
             elif is_speaking:
                 mic_part = "[bold green]🎙️[/bold green]"
@@ -750,9 +766,9 @@ class PartyClient:
                 mic_part = "[dim]🎙️[/dim]"
                 
             # Deafen logic
-            if u.get('deafened'): # Global
+            if user_deafened:
                 def_part = "[red]🔕[/red]"
-            elif u.get('hash_id') in self.local_deafened: # Local
+            elif u.get('hash_id') in self.local_deafened: # Local deafen by viewer
                 def_part = "[dim]🔕[/dim]"
             else:
                 def_part = "[dim]🔊[/dim]"
@@ -879,11 +895,10 @@ class PartyClient:
                             self.chat_history.append("[dim]Video player closed.[/dim]")
                             self._last_closed_notice_ts = now
             
-                # Final countdown loop before closing
-                for i in range(5, 0, -1):
-                    self.chat_history.append(f"[bold yellow]⚠️ Session ended. Terminal closing in {i}...[/bold yellow]")
-                    live.update(self.generate_layout())
-                    await asyncio.sleep(1)
+                # Final message before closing
+                self.chat_history.append("[bold yellow]Session ended by the host. Terminal will close in 5 seconds[/bold yellow]")
+                live.update(self.generate_layout())
+                await asyncio.sleep(5)
             
         finally:
             self.running = False

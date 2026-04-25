@@ -40,6 +40,7 @@ class DiscordRPCManager:
 
         last_rpc_call = 0
         pending_state = None
+        last_sent_state = None  # Track what was last pushed to Discord
 
         while self.enabled:
             if not self.connected:
@@ -48,6 +49,7 @@ class DiscordRPCManager:
                     self.rpc.connect()
                     self.connected = True
                     last_rpc_call = 0  # allow immediate update on reconnect
+                    last_sent_state = None  # force refresh on reconnect
                     with self.lock:
                         if self.current_state:
                             pending_state = self.current_state
@@ -69,15 +71,32 @@ class DiscordRPCManager:
 
             if pending_state and self.connected and self.rpc:
                 now = time.time()
-                wait = 15.1 - (now - last_rpc_call)
+
+                # Detect if this is a genuine state change vs. a same-state refresh.
+                # State changes (e.g. "Watching Anime" → "Browsing") use a shorter
+                # cooldown so Discord presence feels responsive on transitions.
+                is_state_change = (
+                    not last_sent_state
+                    or pending_state.get("clear_rpc_signal")
+                    or last_sent_state.get("clear_rpc_signal")
+                    or last_sent_state.get("state") != pending_state.get("state")
+                    or last_sent_state.get("details") != pending_state.get("details")
+                    or last_sent_state.get("large_image") != pending_state.get("large_image")
+                )
+
+                cooldown = 5.0 if is_state_change else 15.1
+                wait = cooldown - (now - last_rpc_call)
                 if wait > 0:
                     time.sleep(wait)
+
                 try:
                     if pending_state.get("clear_rpc_signal"):
                         self.rpc.clear()
+                        last_sent_state = {"clear_rpc_signal": True}
                     else:
                         kwargs = {k: v for k, v in pending_state.items() if v is not None}
                         self.rpc.update(**kwargs)
+                        last_sent_state = dict(pending_state)
                     last_rpc_call = time.time()
                     pending_state = None
                 except Exception:

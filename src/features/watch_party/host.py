@@ -43,7 +43,7 @@ class PartyAdminTUI:
         
         self.users = []
         self.chat_history = []
-        self.room_url = "Starting..."
+        self.room_url = "Starting"
         self.room_name = "Watch Party Admin"
         self.input_text = ""
         self.system_messages = []
@@ -183,7 +183,7 @@ class PartyAdminTUI:
                     if len(target_display) > 40:
                         target_display = target_display[:37] + "..."
                         
-                    self.chat_history.append(f"[dim]Connecting to {target_display} (attempt {attempt}/{max_retries})...[/dim]")
+                    self.chat_history.append(f"[dim]Connecting to {target_display} (attempt {attempt}/{max_retries})[/dim]")
                     self.ws = await websockets.connect(self.ws_url, **connect_kwargs)
                     logger.info(f"[LIFECYCLE] Connected to party server at {self.ws_url}")
                     rpc_manager.set_in_party(
@@ -204,7 +204,7 @@ class PartyAdminTUI:
                         error_hint = str(e)
                         
                     if attempt < max_retries:
-                        self.chat_history.append(f"[dim]Could not reach server, retrying in {retry_delay:.0f}s... ([red]{error_hint}[/red])[/dim]")
+                        self.chat_history.append(f"[dim]Could not reach server, retrying in {retry_delay:.0f}s ([red]{error_hint}[/red])[/dim]")
                         await asyncio.sleep(retry_delay)
                         retry_delay = min(retry_delay * 1.5, 10.0)
                     else:
@@ -238,6 +238,12 @@ class PartyAdminTUI:
                         hash_len = int(message[0])
                         sender_hash = message[1:1+hash_len].decode('utf-8')
                         audio_payload = message[1+hash_len:]
+                        
+                        # Track speaking state locally for UI indicator
+                        for u in self.users:
+                            if u.get('hash_id') == sender_hash:
+                                u['last_spoke'] = time.time()
+                                break
                         
                         # Apply Local Mute/Deafen filter using Hash-ID
                         if sender_hash in self.local_muted or sender_hash in self.local_deafened:
@@ -341,7 +347,7 @@ class PartyAdminTUI:
                     
         except websockets.exceptions.ConnectionClosed:
             self.chat_history.append("[bold red]Connection lost. Session ended.[/bold red]")
-            self.chat_history.append("[bold yellow]This window will close automatically in 3 seconds...[/bold yellow]")
+            self.chat_history.append("[bold yellow]This window will close automatically in 3 seconds[/bold yellow]")
             self.running = False
         except Exception as e:
             msg = str(e).lower()
@@ -492,17 +498,27 @@ class PartyAdminTUI:
         for u in self.users:
             name = u.get("name", "Unknown")
             is_host = u.get('role') == 'host'
+            is_self = u.get('name') == self.username
             status_icon = "👑" if is_host else ("🟢" if u.get('online') else "🔴")
             
             # Voice / Audio Icons (Discord style)
             mic_part = ""
             def_part = ""
             
+            # For own entry, use local state (instant update, no server round-trip)
+            # For others, combine admin-mute and self-mute from server data
+            if is_self:
+                user_muted = self.mic_muted
+                user_deafened = self.speaker_muted
+            else:
+                user_muted = u.get('muted', False) or u.get('local_muted', False)
+                user_deafened = u.get('deafened', False) or u.get('local_deafened', False)
+            
             # Mic logic
             is_speaking = (time.time() - u.get('last_spoke', 0)) < 0.8
-            if u.get('muted'): # Global
+            if user_muted:
                 mic_part = "[red]🔇[/red]"
-            elif u.get('hash_id') in self.local_muted: # Local
+            elif u.get('hash_id') in self.local_muted: # Local mute by viewer
                 mic_part = "[dim]🔇[/dim]"
             elif is_speaking:
                 mic_part = "[bold green]🎙️[/bold green]"
@@ -510,9 +526,9 @@ class PartyAdminTUI:
                 mic_part = "[dim]🎙️[/dim]"
                 
             # Deafen logic
-            if u.get('deafened'): # Global
+            if user_deafened:
                 def_part = "[red]🔕[/red]"
-            elif u.get('hash_id') in self.local_deafened: # Local
+            elif u.get('hash_id') in self.local_deafened: # Local deafen by viewer
                 def_part = "[dim]🔕[/dim]"
             else:
                 def_part = "[dim]🔊[/dim]"
@@ -806,11 +822,10 @@ class PartyAdminTUI:
                     live.update(self.generate_layout())
                     await asyncio.sleep(0.05)
                 
-                # Final countdown loop before closing
-                for i in range(5, 0, -1):
-                    self.chat_history.append(f"[bold yellow]⚠️ Session ended. Terminal closing in {i}...[/bold yellow]")
-                    live.update(self.generate_layout())
-                    await asyncio.sleep(1)
+                # Final message before closing
+                self.chat_history.append("[bold yellow]Session ended. Terminal will close in 5 seconds[/bold yellow]")
+                live.update(self.generate_layout())
+                await asyncio.sleep(5)
         finally:
             self.running = False
             input_handler.cleanup()

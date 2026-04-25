@@ -1,5 +1,6 @@
 from shared.utils.logger import install_asyncio_exception_handler, setup_logger
 from shared.discord_rpc import rpc_manager
+from shared.dependency_checker import run_startup_check
 import asyncio
 import requests
 import os
@@ -82,6 +83,19 @@ def _trunc(text, width=35):
     if not text:
         return ""
     return (text[:width-1] + "…") if len(text) > width else text
+
+def _play_shutdown_animation():
+    """Play a clean shutdown animation before exiting."""
+    console.clear()
+    console.print()
+    console.print()
+    console.print(Align.center(f"[bold cyan]{PROJECT_NAME}[/bold cyan]"))
+    console.print(Align.center("[dim]Session ended[/dim]"))
+    console.print()
+    console.print(Align.center("[magenta]さようなら[/magenta]"))
+    console.print()
+    time.sleep(1.5)
+
 
 def fetch_json(url, params=None, ttl_hours=24):
     """Fetch JSON from API with persistent disk caching."""
@@ -378,11 +392,11 @@ def start_backend():
                 banner_text = f.read()
                 console.print(Align.center(Text(banner_text, style="bold cyan")))
         except Exception:
-            console.print(Align.center(f"[bold cyan]✨ {PROJECT_NAME} ✨[/bold cyan]"))
+            console.print(Align.center(f"[bold cyan]{PROJECT_NAME}[/bold cyan]"))
     else:
-        console.print(Align.center(f"[bold cyan]✨ {PROJECT_NAME} ✨[/bold cyan]"))
+        console.print(Align.center(f"[bold cyan]{PROJECT_NAME}[/bold cyan]"))
 
-    console.print(Align.center(f"[bold magenta]v{VERSION}[/bold magenta] [dim]|[/dim] [dim]Made with 💖 by [bold cyan]Vibhas Dutta[/bold cyan][/dim]"))
+    console.print(Align.center(f"[bold magenta]v{VERSION}[/bold magenta] [dim]|[/dim] [dim]Made with 💖 by [bold cyan]Vibhas Dutta[/bold cyan], [bold cyan]Abhinav[/bold cyan][/dim]"))
     console.print(Align.center(Rule(style="dim cyan"), width=60))
     console.print()
 
@@ -593,12 +607,15 @@ def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=Fal
         console.print("[bold red]❌ ERROR: mpv Player Not Found![/bold red]")
         console.print(f"[white]{PROJECT_NAME} now requires [bold cyan]mpv[/bold cyan] for all playback and tracking.[/white]")
         
-        if current_os == "Windows":
-            console.print("[white]👉 Install: [cyan]https://mpv.io/installation/[/cyan] or [magenta]'choco install mpv'[/magenta][/white]")
-        elif current_os == "Darwin":
-            console.print("[white]👉 Install: [magenta]'brew install mpv'[/magenta][/white]")
+        if current_os is OS.WINDOWS:
+            console.print("[white]👉 Install:[/white]")
+            console.print("   [magenta]scoop install mpv[/magenta]")
+            console.print("   [magenta]choco install mpv[/magenta]")
+            console.print("   [dim]or download from[/dim] [cyan]https://mpv.io/installation/[/cyan]")
+        elif current_os is OS.MACOS:
+            console.print("[white]👉 Install: [magenta]brew install mpv[/magenta][/white]")
         else:
-            console.print("[white]👉 Install: [magenta]'sudo apt install mpv'[/magenta][/white]")
+            console.print("[white]👉 Install: [magenta]sudo apt install mpv[/magenta][/white]")
         console.print("="*50 + "\n")
         
         Prompt.ask("[bold yellow]Press Enter to return to menu[/bold yellow]")
@@ -668,7 +685,7 @@ def show_anime_grid(results):
     while True:
         console.clear()
         console.print()
-        console.rule(f"[bold cyan]✨ {PROJECT_NAME} ✨[/bold cyan]  [dim]Page {page+1}/{total_pages}[/dim]", style="cyan")
+        console.rule(f"[bold cyan]{PROJECT_NAME}[/bold cyan]  [dim]Page {page+1}/{total_pages}[/dim]", style="cyan")
         console.print()
         
         start = page * page_size
@@ -723,12 +740,12 @@ def display_characters(anilist_id, anime_title):
     page = 1
     while True:
         console.clear()
-        with status_after(f"[yellow]👥 Loading characters for [bold]{anime_title}[/bold] (Page {page})...[/yellow]"):
+        with status_after(f"[yellow]Loading characters for [bold]{anime_title}[/bold] (Page {page})[/yellow]"):
             data = fetch_json(f"{API_BASE}/anime/{anilist_id}/characters?page={page}&per_page=12")
             
         if not data or not data.get("characters"):
             console.print("[red]No characters found or failed to load.[/red]")
-            input("\nPress Enter to go back...")
+            input("\nPress Enter to go back")
             return
 
         total_chars = data.get("characters", [])
@@ -764,12 +781,12 @@ def display_characters(anilist_id, anime_title):
 
 def display_recommendations(anilist_id, anime_title):
     console.clear()
-    with status_after(f"[yellow]💡 Loading recommendations for [bold]{anime_title}[/bold]...[/yellow]"):
+    with status_after(f"[yellow]Loading recommendations for [bold]{anime_title}[/bold][/yellow]"):
         data = fetch_json(f"{API_BASE}/anime/{anilist_id}/recommendations?per_page=15")
         
     if not data or not data.get("recommendations"):
         console.print("[red]No recommendations found.[/red]")
-        input("\nPress Enter to go back...")
+        input("\nPress Enter to go back")
         return
 
     nodes = data.get("recommendations", [])
@@ -987,52 +1004,68 @@ def handle_audio_peripherals():
     from features.voice_chat.voice_manager import VoiceManager
     import sounddevice as sd
     from core.config import update_admin_config, update_client_config, load_config
+    from rich.live import Live
+    from rich.panel import Panel
+    from rich.columns import Columns
     
     while True:
         cfg = load_config()
-        # Use admin config as source of truth for setup (it syncs to client anyway)
         mic_idx = cfg["admin"].get("mic_device_index")
         
-        # Get actual names if possible
+        # Get device names
         devices = sd.query_devices()
-        mic_name = "Default"
+        mic_name = "System Default"
         if mic_idx is not None and mic_idx < len(devices):
             mic_name = devices[mic_idx]['name']
 
         console.clear()
-        console.rule("[bold magenta]🎙️ AUDIO PERIPHERALS[/bold magenta]", style="dim magenta")
-        console.print(f"\n[cyan]Microphone:[/cyan]  {mic_name}")
-        console.print("\n[dim]Anime and Voice Chat will follow your Windows default output.[/dim]")
+        console.print()
+        console.rule(f"[bold cyan]{PROJECT_NAME}[/bold cyan]  [dim]|[/dim]  [magenta]Audio Settings[/magenta]", style="cyan")
+        console.print()
+        
+        # Current config panel
+        info_table = Table(show_header=False, box=None, padding=(0, 2), expand=False)
+        info_table.add_column("Label", style="dim")
+        info_table.add_column("Value", style="bold")
+        info_table.add_row("Microphone", f"[cyan]{mic_name}[/cyan]")
+        info_table.add_row("Sample Rate", "[dim]24000 Hz[/dim]")
+        info_table.add_row("Output", "[dim]System Default[/dim]")
+        console.print(Align.center(info_table))
         console.print()
         
         choice = questionary.select(
-            "Peripherals Menu:",
+            "Audio Settings:",
             choices=[
-                "Change Microphone",
-                "Test Microphone (Live Bar)",
-                "Hear a Test Sound (Headphones)",
+                questionary.Choice("  Change Microphone", value="mic"),
+                questionary.Choice("  Test Mic Level", value="level"),
+                questionary.Choice("  Mic Loopback (Hear Yourself)", value="loopback"),
+                questionary.Choice("  Play Test Tone", value="tone"),
                 questionary.Separator(),
-                "Save & Back"
+                questionary.Choice("  Back", value="back"),
             ],
             style=QSTYLE
         ).ask()
         
-        if choice == "Save & Back" or choice is None:
+        if choice == "back" or choice is None:
             break
             
-        if choice == "Change Microphone":
+        if choice == "mic":
             mics = VoiceManager.get_devices(kind='input')
-            mic_choices = [questionary.Choice(f" {m['index']}: {m['name']}", value=m['index']) for m in mics]
-            mic_choices.insert(0, questionary.Choice("  🔙  Back", value="back"))
-            mic_choices.insert(1, questionary.Choice("Default System Device", value=None))
+            mic_choices = [questionary.Choice(f"  {m['name']}", value=m['index']) for m in mics]
+            mic_choices.insert(0, questionary.Choice("  System Default", value=None))
+            mic_choices.append(questionary.Separator())
+            mic_choices.append(questionary.Choice("  Back", value="back"))
             
             new_mic = questionary.select("Select Microphone:", choices=mic_choices, style=QSTYLE).ask()
             if new_mic != "back":
                 update_admin_config(mic_device_index=new_mic)
                 update_client_config(mic_device_index=new_mic)
             
-        elif choice == "Test Microphone (Live Bar)":
-            console.print("[yellow]Mic Test active for 10 seconds. Speak now![/yellow]")
+        elif choice == "level":
+            console.print()
+            console.print(Align.center("[cyan]Speak into your microphone[/cyan]"))
+            console.print(Align.center("[dim]Test runs for 8 seconds[/dim]"))
+            console.print()
             try:
                 loop = asyncio.get_event_loop()
             except RuntimeError:
@@ -1043,32 +1076,87 @@ def handle_audio_peripherals():
             vm.mic_muted = False
             vm.start()
             
-            from rich.live import Live
-            from rich.panel import Panel
-            
             def make_bar():
                 vol = vm.current_volume
                 bar_len = int(vol * 40)
-                bar = "█" * bar_len + " " * (40 - bar_len)
+                filled = "=" * bar_len
+                empty = " " * (40 - bar_len)
                 color = "green" if vol < 0.6 else ("yellow" if vol < 0.8 else "red")
-                return Panel(f"[{color}]{bar}[/{color}]", title="Mic Input Level", width=50)
+                pct = f"{int(vol * 100)}%"
+                return Panel(
+                    Align.center(f"[{color}][{filled}{empty}][/{color}]  [bold]{pct}[/bold]"),
+                    title="[dim]Mic Input Level[/dim]",
+                    border_style="cyan",
+                    width=60,
+                )
 
-            with Live(make_bar(), refresh_per_second=20) as live:
-                for _ in range(200): # ~10 seconds
+            with Live(make_bar(), refresh_per_second=20, console=console) as live:
+                for _ in range(160):  # ~8 seconds
                     live.update(make_bar())
                     time.sleep(0.05)
             vm.stop()
+            console.print(Align.center("[dim]Test complete[/dim]"))
+            time.sleep(0.5)
 
-        elif choice == "Hear a Test Sound (Headphones)":
-            console.print("[yellow]Playing test tone...[/yellow]")
+        elif choice == "loopback":
+            console.print()
+            console.print(Align.center("[cyan]Loopback Test - You will hear your own voice[/cyan]"))
+            console.print(Align.center("[dim]Runs for 8 seconds. Use headphones to avoid echo[/dim]"))
+            console.print()
+            
             try:
                 loop = asyncio.get_event_loop()
             except RuntimeError:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-            # Use output_device=None to play through Windows Default
+            
+            vol_holder = [0.0]
+            def _on_vol(v):
+                vol_holder[0] = v
+            
+            vm = VoiceManager(loop, input_device=mic_idx, output_device=None)
+            
+            def make_loopback_bar():
+                vol = vol_holder[0]
+                bar_len = int(vol * 40)
+                filled = "=" * bar_len
+                empty = " " * (40 - bar_len)
+                color = "green" if vol < 0.6 else ("yellow" if vol < 0.8 else "red")
+                return Panel(
+                    Align.center(f"[{color}][{filled}{empty}][/{color}]"),
+                    title="[dim]Loopback Active[/dim]",
+                    border_style="magenta",
+                    width=60,
+                )
+            
+            import threading
+            loopback_thread = threading.Thread(
+                target=vm.loopback_test,
+                kwargs={"duration": 8.0, "on_volume": _on_vol},
+                daemon=True,
+            )
+            loopback_thread.start()
+            
+            with Live(make_loopback_bar(), refresh_per_second=20, console=console) as live:
+                while loopback_thread.is_alive():
+                    live.update(make_loopback_bar())
+                    time.sleep(0.05)
+            
+            console.print(Align.center("[dim]Loopback complete[/dim]"))
+            time.sleep(0.5)
+
+        elif choice == "tone":
+            console.print()
+            console.print(Align.center("[cyan]Playing 440Hz test tone[/cyan]"))
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
             vm = VoiceManager(loop, output_device=None)
             vm.play_test_sound()
+            time.sleep(0.3)
+
 
 def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None, ipc_server_path=None, anime_meta=None):
     with status_after(f"[yellow]🔍 Fetching providers for {t_str}[/yellow]"):
@@ -1448,8 +1536,8 @@ def main():
             if not party_active:
                 rpc_manager.set_browsing()
             console.clear()
-            console.rule(f"[bold cyan]✨ {PROJECT_NAME} ✨[/bold cyan]", style="cyan")
-            console.print(Align.center(f"[dim]v{VERSION}  |  Choose Your Playback Mode[/dim]"))
+            console.rule(f"[bold cyan]{PROJECT_NAME}[/bold cyan]", style="cyan")
+            console.print(Align.center(f"[dim]Choose Your Playback Mode[/dim]"))
             console.print()
 
             mode = questionary.select(
@@ -1465,7 +1553,7 @@ def main():
             ).ask()
             
             if mode is None or mode == "exit":
-                console.print(Align.center("[bold magenta]さようなら! 👋✨[/bold magenta]"))
+                _play_shutdown_animation()
                 return
             
             if mode == "solo":
@@ -1479,7 +1567,7 @@ def main():
         # ─── VIEW: PARTY SETUP ───
         elif view == "party":
             console.clear()
-            console.rule("[bold cyan]🎉 WATCH PARTY MODE[/bold cyan]", style="dim cyan")
+            console.rule(f"[bold cyan]{PROJECT_NAME}[/bold cyan]  [dim]|[/dim]  [green]Party[/green]", style="cyan")
             console.print()
             
             party_choice = questionary.select(
@@ -1523,7 +1611,7 @@ def main():
                 console.print("[yellow]Connecting... a new window will open for chat.[/yellow]")
                 _open_in_new_terminal(os.path.join(os.path.dirname(__file__), "features", "watch_party", "client.py"), [party_url, username], title=f"Streamix - {username} (Party Client)")
                 console.print("[bold green]✅ Client window launched![/bold green]")
-                input("Press Enter to return to menu...")
+                input("Press Enter to return to menu")
                 view = "home"
                 continue
 
@@ -1540,7 +1628,12 @@ def main():
                 if not room_name or not host_name or not max_users: continue
                 update_admin_config(default_room_name=room_name, default_host_name=host_name)
                 
-                console.print("[yellow]Starting party server and ngrok tunnel...[/yellow]")
+                console.print()
+                console.print(Rule("[bold cyan]Party Setup[/bold cyan]", style="cyan"))
+                console.print()
+
+                # Step 1: Start server
+                console.print("  [dim]>[/dim] Starting party server")
                 
                 _cleanup_party()
                 time.sleep(0.5)
@@ -1550,7 +1643,9 @@ def main():
                 party_proc = subprocess.Popen(["uv", "run", os.path.join(os.path.dirname(__file__), "features", "watch_party", "party.py"), room_name, host_name, max_users], stdout=party_log, stderr=party_log)
                 active_subprocesses.append(party_proc)
                 
-                with status_after("[yellow]📡 Starting Party Server...[/yellow]", center=True):
+                # Step 2: Wait for ngrok tunnel
+                console.print("  [dim]>[/dim] Creating ngrok tunnel")
+                with status_after("[yellow]Waiting for tunnel[/yellow]", center=True):
                     for _ in range(25):
                         if PARTY_INFO_PATH.exists(): break
                         time.sleep(0.5)
@@ -1558,19 +1653,26 @@ def main():
                 if PARTY_INFO_PATH.exists():
                     with open(PARTY_INFO_PATH, "r") as f:
                         info = json.load(f)
-                        console.print(f"\n[bold green]✅ Party ready! Share this link with friends:[/bold green]")
-                        console.print(Align.center(f"[bold yellow]{info['url']}[/bold yellow]"))
-                        
-                        try:
-                            if IS_WINDOWS:
-                                subprocess.run(['clip'], input=info['url'].encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                            elif IS_MACOS:
-                                subprocess.run(['pbcopy'], input=info['url'].encode())
-                            else:
-                                if shutil.which('xclip'):
-                                    subprocess.run(['xclip', '-selection', 'clipboard'], input=info['url'].encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                            console.print(Align.center("[dim italic](Link automatically copied to your clipboard!)[/dim italic]"))
-                        except: pass
+                    
+                    console.print("  [bold green]>[/bold green] Tunnel ready")
+                    console.print()
+                    console.print(Rule("[bold green]Party Link[/bold green]", style="green"))
+                    console.print()
+                    console.print(Align.center(f"[bold yellow]{info['url']}[/bold yellow]"))
+                    console.print()
+                    
+                    try:
+                        if IS_WINDOWS:
+                            subprocess.run(['clip'], input=info['url'].encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        elif IS_MACOS:
+                            subprocess.run(['pbcopy'], input=info['url'].encode())
+                        else:
+                            if shutil.which('xclip'):
+                                subprocess.run(['xclip', '-selection', 'clipboard'], input=info['url'].encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        console.print(Align.center("[dim italic]Copied to clipboard[/dim italic]"))
+                    except: pass
+                    
+                    console.print()
                     
                     host_ws_url = info.get("local_url") or info["url"]
                     _open_in_new_terminal(
@@ -1579,26 +1681,26 @@ def main():
                         title=f"Streamix - {info.get('room_name', 'Party')} (Host: {host_name})",
                     )
                     
-                    console.print("[dim]Admin console opened in a new window.[/dim]")
+                    console.print("  [dim]>[/dim] Admin console opened in new window")
                     rpc_manager.clear_presence()
                     party_active = True
                     is_host = True
                 else:
-                    console.print("[red]❌ Failed to start party server. Check logs.[/red]")
+                    console.print("  [bold red]>[/bold red] Failed to start party server. Check logs")
                     if party_proc: party_proc.terminate()
                     ipc_server_path = None
                     rpc_manager.set_browsing()
                     time.sleep(2)
                     continue
                 
-                console.print("\n[bold cyan]Now pick what to watch! 🍿[/bold cyan]")
+                console.print("\n[bold cyan]Now pick what to watch![/bold cyan]")
                 time.sleep(1.5)
                 view = "dashboard"
 
         # ─── VIEW: DASHBOARD (Main browsing loop) ───
         elif view == "dashboard":
             if party_active and party_proc and party_proc.poll() is not None:
-                console.print("[yellow]Party session ended. Returning to home menu...[/yellow]")
+                console.print("[yellow]Party session ended. Returning to home menu[/yellow]")
                 _cleanup_party()
                 party_active = False
                 party_active_flag.clear()
@@ -1617,11 +1719,8 @@ def main():
             console.clear()
             console.print()
             
-            mode_label = "[green]🎉 Party[/green]" if party_active else "[cyan]🎬 Solo[/cyan]"
-            mpv_ok = "[green]✓[/green]" if get_mpv_path() else "[red]✗[/red]"
-            console.rule(f"[bold cyan]✨ {PROJECT_NAME} ✨[/bold cyan]", style="cyan")
-            console.print(Align.center(f"{mode_label}  [dim]|[/dim]  [dim]v{VERSION}[/dim]  [dim]|[/dim]  mpv {mpv_ok}"))
-            console.print(Rule(style="dim cyan"))
+            mode_label = "[green]Party[/green]" if party_active else "[cyan]Solo[/cyan]"
+            console.rule(f"[bold cyan]{PROJECT_NAME}[/bold cyan]  [dim]|[/dim]  {mode_label}", style="cyan")
             console.print()
 
             cache = load_cache()
@@ -1649,7 +1748,7 @@ def main():
             ).ask()
             
             if not choice or choice == "exit":
-                console.print(Align.center("[bold magenta]さようなら! 👋✨[/bold magenta]"))
+                _play_shutdown_animation()
                 return
             
             if choice == "back":
@@ -1693,7 +1792,7 @@ def main():
                 clean_path = c_path.strip("\"'")
                 if sub_choice in ["link", "live"] and not clean_path.startswith("http"): clean_path = "https://" + clean_path
                 
-                with status_after("[yellow]▶️ Preparing playback...[/yellow]", center=True): time.sleep(0.5)
+                with status_after("[yellow]Preparing playback[/yellow]", center=True): time.sleep(0.5)
                 play_video(clean_path, anime_title="Custom Playback", is_custom=True, is_live=is_live, ipc_server=ipc_server_path)
 
             elif choice == 'search':
@@ -1813,10 +1912,15 @@ if __name__ == "__main__":
     atexit.register(lambda: stop_backend(stop_party=party_active_flag.is_set()))
     
     try:
+        # ── Dependency Check ──
+        all_ok, _ = run_startup_check(console)
+        if not all_ok:
+            Prompt.ask("[bold yellow]Press Enter to continue[/bold yellow]")
+
         start_backend()
         main()
     except KeyboardInterrupt:
-        console.print(f"\n\n[bold magenta]さようなら! 👋✨ Logging out of {PROJECT_NAME}[/bold magenta]")
+        _play_shutdown_animation()
     except Exception as e:
         console.print(f"\n\n[bold red]❌ CRITICAL ERROR:[/bold red] {e}")
         console.print("[dim]Backend has been safely shut down.[/dim]")
