@@ -733,7 +733,77 @@ async def get_anime_info(anilist_id: int):
     return _proxy_deep_images(media)
 
 
-# ─── Streaming (Pipe-based — unchanged logic) ───────────────────────────────
+# ─── Streaming (Pipe-based) ──────────────────────────────────────────────────
+
+def _normalize_sources(raw: dict) -> dict:
+    """
+    Normalize provider source responses into a unified shape:
+      {
+        "streams":   [{"url": ..., "quality": ..., "type": ..., "referer": ...}],
+        "subtitles": [...],
+        "intro":     {"start": int, "end": int} | null,
+        "outro":     {"start": int, "end": int} | null,
+        "thumbnail": str | null,
+        "download":  str | null,
+      }
+
+    Providers return two shapes:
+      A) top-level "streams" list  (ally, arc)
+      B) "ssub" -> {"streams": [...]}  (dune, hop, bee)
+    """
+    # Resolve streams list
+    if "streams" in raw and isinstance(raw["streams"], list):
+        raw_streams = raw["streams"]
+    elif "ssub" in raw and isinstance(raw.get("ssub"), dict):
+        raw_streams = raw["ssub"].get("streams", [])
+    else:
+        # fallback: search any key whose value is a list with url items
+        raw_streams = []
+        for v in raw.values():
+            if isinstance(v, list) and v and isinstance(v[0], dict) and "url" in v[0]:
+                raw_streams = v
+                break
+            if isinstance(v, dict):
+                inner = v.get("streams", [])
+                if inner and isinstance(inner[0], dict) and "url" in inner[0]:
+                    raw_streams = inner
+                    break
+
+    # Normalize each stream entry — add quality label from resolution/label/type
+    streams = []
+    for s in raw_streams:
+        url = s.get("url", "")
+        quality = s.get("quality") or s.get("label") or s.get("resolution") or _infer_quality(url)
+        streams.append({
+            "url": url,
+            "quality": quality,
+            "type": s.get("type", "hls"),
+            "referer": s.get("referer"),
+            "server": s.get("server"),
+        })
+
+    # Resolve subtitles (may live at top level or inside ssub)
+    subtitles = raw.get("subtitles") or raw.get("ssub", {}).get("subtitles", []) if isinstance(raw.get("ssub"), dict) else raw.get("subtitles", [])
+
+    return {
+        "streams": streams,
+        "subtitles": subtitles or [],
+        "intro": raw.get("intro") or (raw.get("ssub", {}).get("intro") if isinstance(raw.get("ssub"), dict) else None),
+        "outro": raw.get("outro") or (raw.get("ssub", {}).get("outro") if isinstance(raw.get("ssub"), dict) else None),
+        "thumbnail": raw.get("thumbnail"),
+        "download": raw.get("download"),
+    }
+
+
+def _infer_quality(url: str) -> str:
+    """Guess quality from URL patterns like 1080, 720, master, etc."""
+    for res in ("2160", "1080", "720", "480", "360"):
+        if res in url:
+            return f"{res}p"
+    if "master" in url.lower():
+        return "Auto"
+    return "Auto"
+
 
 @app.get("/episodes/{anilist_id}")
 async def get_episodes(anilist_id: int):
@@ -742,14 +812,8 @@ async def get_episodes(anilist_id: int):
     return _proxy_deep_images(_inject_source_slugs(data, anilist_id))
 
 
-@app.get("/sources")
-async def get_sources(
-    episodeId: str = Query(..., description="Plain-text episode ID from /episodes response"),
-    provider: str = Query(..., description="Provider name, e.g. kiwi, arc, telli"),
-    anilistId: int = Query(..., description="AniList anime ID"),
-    category: str = Query("sub", description="sub or dub"),
-):
-    """Get M3U8 streaming sources for a specific episode."""
+async def _fetch_sources_raw(episodeId: str, provider: str, anilistId: int, category: str) -> dict:
+    """Fetch and decode raw source response from Miruro pipe."""
     enc_id = base64.urlsafe_b64encode(episodeId.encode()).decode().rstrip('=')
     payload = {
         "path": "sources",
@@ -763,28 +827,42 @@ async def get_sources(
         "body": None,
         "version": "0.1.0",
     }
-    encoded_req = _encode_pipe_request(payload)
-    res = await _fetch_pipe(encoded_req)
-    return _proxy_deep_images(_decode_pipe_response(res.text.strip()))
+    res = await _fetch_pipe(_encode_pipe_request(payload))
+    return _decode_pipe_response(res.text.strip())
+
+
+@app.get("/sources")
+async def get_sources(
+    episodeId: str = Query(..., description="Plain-text episode ID from /episodes response"),
+    provider: str = Query(..., description="Provider name, e.g. kiwi, arc, telli"),
+    anilistId: int = Query(..., description="AniList anime ID"),
+    category: str = Query("sub", description="sub or dub"),
+):
+    """Get normalized streaming sources for a specific episode."""
+    raw = await _fetch_sources_raw(episodeId, provider, anilistId, category)
+    return _proxy_deep_images(_normalize_sources(raw))
+
 
 @app.get("/watch/{provider}/{anilist_id}/{category}/{slug}")
 async def get_watch_sources(provider: str, anilist_id: int, category: str, slug: str):
-    """The super simple sources endpoint resolving slugs (prefix-number) back to provider IDs."""
+    """Resolve a slug (prefix-number) to provider ID and return normalized sources."""
     data = await _fetch_raw_episodes(anilist_id)
     prov_data = data.get("providers", {}).get(provider, {})
-    ep_list = prov_data.get("episodes", {}).get(category, [])
-    
-    # Resolve the slug back to the original ID
+    ep_list = prov_data.get("episodes", {})
+    if isinstance(ep_list, list):
+        ep_list = {"sub": ep_list}
+    ep_list = ep_list.get(category, [])
+
     target_id = None
     for ep in ep_list:
         orig_id = ep.get("id", "")
         prefix = orig_id.split(":")[0] if ":" in orig_id else orig_id
-        generated = f"{prefix}-{ep.get('number')}"
-        if generated == slug:
+        if f"{prefix}-{ep.get('number')}" == slug:
             target_id = orig_id
             break
-            
+
     if not target_id:
         raise HTTPException(status_code=404, detail=f"Episode slug '{slug}' not found for provider {provider}")
-        
-    return await get_sources(episodeId=target_id, provider=provider, anilistId=anilist_id, category=category)
+
+    raw = await _fetch_sources_raw(target_id, provider, anilist_id, category)
+    return _proxy_deep_images(_normalize_sources(raw))

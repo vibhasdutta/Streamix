@@ -59,22 +59,30 @@ Streamix is a **terminal-first streaming and watch party platform**. Host synchr
 
 ### Prerequisites
 
-| Tool | Purpose | Install |
-|---|---|---|
-| [uv](https://github.com/astral-sh/uv) | Python package manager | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
-| [mpv](https://mpv.io/) | Video playback | `scoop install mpv` / `brew install mpv` / `sudo apt install mpv` |
-| [ngrok](https://ngrok.com/) | Watch Party tunneling | `scoop install ngrok` / `brew install ngrok` / `snap install ngrok` |
+| Tool | Windows | macOS | Linux |
+|---|---|---|---|
+| [uv](https://docs.astral.sh/uv/getting-started/installation/) | [Installer guide](https://docs.astral.sh/uv/getting-started/installation/#windows) | [Installer guide](https://docs.astral.sh/uv/getting-started/installation/#macos-and-linux) | [Installer guide](https://docs.astral.sh/uv/getting-started/installation/#macos-and-linux) |
+| [mpv](https://mpv.io/installation/) | [Download or install with Scoop/Chocolatey](https://mpv.io/installation/) | [Install with Homebrew](https://mpv.io/installation/) | [Install with your distro package manager](https://mpv.io/installation/) |
+| [ngrok](https://ngrok.com/download) | [Download for Windows](https://ngrok.com/download) | [Download for macOS](https://ngrok.com/download) | [Download for Linux](https://ngrok.com/download) |
 
 ### Setup
 
-```bash
-# Clone the repository
-git clone https://github.com/VibhasDutta/streamix.git
-cd streamix
+1. Clone the repository.
 
-# Install all Python dependencies
-uv sync
-```
+  ```bash
+  git clone https://github.com/VibhasDutta/streamix.git
+  cd streamix
+  ```
+
+2. Install the Python dependencies with `uv`.
+
+  ```bash
+  uv sync
+  ```
+
+3. Install and verify `mpv` and `ngrok` for your operating system using the links above.
+
+4. Add your ngrok auth token before starting a watch party.
 
 ### Ngrok Auth (Required for hosting Watch Parties)
 

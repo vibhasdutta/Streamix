@@ -458,8 +458,10 @@ def score_bar(score, max_score=100, width=20):
     return f"[{color}]{'█' * filled}[/{color}][dim]{'░' * empty}[/dim] {score}/100"
 
 
-def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=False, is_live=False, quality=None, ipc_server=None, start_time=0, provider=None, total_eps=None, anime_meta=None):
+def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=False, is_live=False, quality=None, ipc_server=None, start_time=0, provider=None, total_eps=None, anime_meta=None, intro=None, outro=None):
     """Platform-aware video playback using mpv exclusively.
+
+    intro/outro: dicts with {"start": int, "end": int} seconds — auto-skipped via IPC.
     """
     mpv_path = get_mpv_path()
 
@@ -504,9 +506,18 @@ def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=Fal
             
         args = [mpv_path, title_arg, "--fs"]
         
+        # Always enable IPC so intro/outro skip can seek via socket
+        _solo_ipc = None
+        if not ipc_server and (intro or outro):
+            if IS_WINDOWS:
+                _solo_ipc = r"\\.\pipe\streamix-solo-skip"
+            else:
+                _solo_ipc = str(LOGS_DIR / "solo_skip.sock")
+            ipc_server = _solo_ipc
+
         if ipc_server:
             args.append(f"--input-ipc-server={ipc_server}")
-        
+
         if is_live:
             args.append("--profile=low-latency")
         
@@ -569,6 +580,27 @@ def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=Fal
 
                 last_pos = 0.0
                 duration = 0.0
+                _intro_skipped = False
+                _outro_skipped = False
+
+                def _mpv_seek(target_sec):
+                    """Send absolute seek command to mpv via IPC socket/pipe."""
+                    import json as _json
+                    cmd = _json.dumps({"command": ["seek", target_sec, "absolute"]}) + "\n"
+                    try:
+                        if IS_WINDOWS:
+                            # Windows named pipe — open as a file (works for named pipes)
+                            with open(ipc_server, "r+b", buffering=0) as _pipe:
+                                _pipe.write(cmd.encode())
+                        else:
+                            import socket as _sock
+                            s = _sock.socket(_sock.AF_UNIX, _sock.SOCK_STREAM)
+                            s.connect(ipc_server)
+                            s.sendall(cmd.encode())
+                            s.close()
+                    except Exception as _e:
+                        logger.debug(f"[SKIP] IPC seek failed: {_e}")
+
                 for line in mpv_process.stdout:
                     if "STREAMIX_POS=" in line:
                         try:
@@ -580,6 +612,27 @@ def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=Fal
                                 duration = float(parts[1])
                         except:
                             pass
+
+                        # Intro skip
+                        if intro and not _intro_skipped and ipc_server:
+                            i_start = intro.get("start", 0)
+                            i_end = intro.get("end", 0)
+                            if i_end > i_start and i_start <= last_pos < i_end:
+                                _intro_skipped = True
+                                console.print(f"\r[bold cyan]⏭ Skipping intro...[/bold cyan]          ")
+                                import threading as _t
+                                _t.Thread(target=_mpv_seek, args=(i_end,), daemon=True).start()
+
+                        # Outro skip
+                        if outro and not _outro_skipped and ipc_server:
+                            o_start = outro.get("start", 0)
+                            o_end = outro.get("end", 0)
+                            if o_end > o_start and o_start <= last_pos < o_end:
+                                _outro_skipped = True
+                                console.print(f"\r[bold cyan]⏭ Skipping outro...[/bold cyan]          ")
+                                import threading as _t
+                                _t.Thread(target=_mpv_seek, args=(o_end,), daemon=True).start()
+
                         rpc_manager.set_watching_solo(
                             title=anime_title,
                             episode=episode_num,
@@ -651,7 +704,9 @@ def save_cache(title, anilist_id, provider, category, episode, total_eps=0, stat
     entry = cache[a_id]
     if total_eps > 0:
         entry["total_eps"] = total_eps
-    entry["status"] = status
+    # Don't downgrade Completed → Watching on rewatch unless explicitly set to Completed again
+    if status == "Completed" or entry.get("status") != "Completed":
+        entry["status"] = status
     entry["provider"] = provider
     entry["category"] = category
     entry["last_watched_ep"] = str(episode)
@@ -986,6 +1041,7 @@ def display_anime_details(selected_anime):
             "score": selected_anime.get("averageScore"),
             "genres": (selected_anime.get("genres") or [])[:2],
             "studio": studios[0] if studios else None,
+            "status": selected_anime.get("status"),  # FINISHED, RELEASING, NOT_YET_RELEASED, etc.
         }
         return "watch", (t_str, anilist_id, anime_meta)
     elif action_val == "characters":
@@ -1175,8 +1231,9 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None,
         
     session_provider = pre_provider
     session_category = pre_category
-    auto_play = True # Default to ON as requested
-    
+    auto_play = True
+    skip_intros = True  # Auto-skip intro/outro by default
+
     while True:
         auto_label = "[green]ON[/green]" if auto_play else "[red]OFF[/red]"
         auto_text = "ON" if auto_play else "OFF"
@@ -1210,9 +1267,11 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None,
             header = f"[bold magenta]{t_str}[/bold magenta]  [dim]|[/dim]  [bold cyan]{session_provider.upper()}[/bold cyan]  [dim]|[/dim]  Auto-Play: {auto_label}"
             console.rule(header, style="magenta")
             console.print()
-            
+
             categories = list(providers[session_provider].get("episodes", {}).keys())
-            cat_choices = [questionary.Choice(f"  🔄  Toggle Auto-Play ({auto_text})", value="toggle_auto")]
+            cat_choices = [
+                questionary.Choice(f"  🔄  Toggle Auto-Play ({auto_text})", value="toggle_auto"),
+            ]
             cat_choices.extend([questionary.Choice(f"  🎬  {c.upper()}", value=c) for c in categories])
             cat_choices.append(questionary.Separator())
             cat_choices.append(questionary.Choice("  🔙  Change Provider", value="back"))
@@ -1231,7 +1290,12 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None,
                 auto_play = not auto_play
                 session_category = None
                 continue
-            
+
+            if session_category == "toggle_skip":
+                skip_intros = not skip_intros
+                session_category = None
+                continue
+
             if session_category == "back":
                 session_provider = None
                 continue
@@ -1260,7 +1324,8 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None,
         console.print()
         watched_count = len(watched_map)
         progress_str = f"{watched_count}/{len(ep_list)}" if len(ep_list) > 0 else ""
-        console.rule(f"[bold magenta]{_trunc(t_str, 30)}[/bold magenta]  [dim]|[/dim]  [bold cyan]{session_provider.upper()}[/bold cyan]  [dim]|[/dim]  [dim]{progress_str} episodes[/dim]", style="magenta")
+        skip_label = "[green]ON[/green]" if skip_intros else "[red]OFF[/red]"
+        console.rule(f"[bold magenta]{_trunc(t_str, 30)}[/bold magenta]  [dim]|[/dim]  [bold cyan]{session_provider.upper()}[/bold cyan]  [dim]|[/dim]  [dim]{progress_str} episodes[/dim]  [dim]|[/dim]  Auto-Skip: {skip_label}", style="magenta")
         console.print()
 
         ep_choices = []
@@ -1287,20 +1352,26 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None,
                 value=ep
             ))
         
+        skip_text = "ON" if skip_intros else "OFF"
         ep_choices.append(questionary.Separator())
+        ep_choices.append(questionary.Choice(f"  ⏭   Toggle Auto-Skip Intro/Outro ({skip_text})", value="toggle_skip"))
         ep_choices.append(questionary.Choice("  🔙  Back to Categories", value="back"))
-        
+
         selected_ep = questionary.select(
             f"Select Episode:",
             choices=ep_choices,
             style=QSTYLE,
             instruction="(↑/↓ navigate)"
         ).ask()
-        
+
         if selected_ep is None:
             session_category = None
             continue
-            
+
+        if selected_ep == "toggle_skip":
+            skip_intros = not skip_intros
+            continue
+
         if selected_ep == "back":
             session_category = None
             continue
@@ -1316,32 +1387,60 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None,
                 continue
             
         streams = watch_res.get("streams", [])
+        ep_intro = watch_res.get("intro")   # {"start": int, "end": int} or None
+        ep_outro = watch_res.get("outro")   # {"start": int, "end": int} or None
         if not streams:
             console.print("[red]❌ No playable video URLs found for this episode![/red]")
             continue
             
         # Select Video Link with Questionary
         quality_icons = {"1080p": "💎", "720p": "🎬", "480p": "📺", "360p": "📟"}
-        stream_choices = [
-            questionary.Choice(
-                title=f"  {quality_icons.get(str(s.get('quality', '')).lower(), '🚀')}  {str(s.get('quality', 'Auto')).upper():<7} | {s.get('url', '')}", 
-                value=s
-            )
-            for s in streams
-        ]
-        stream_choices.append(questionary.Separator())
-        stream_choices.append(questionary.Choice("  🔙  Back to Episodes", value="back"))
-        
-        selected_stream = questionary.select(
-            f"Select Quality (Ep {ep_num}):",
-            choices=stream_choices,
-            style=QSTYLE,
-        ).ask()
-        
-        if selected_stream is None:
-            continue
-            
-        if selected_stream == "back":
+        has_skip_data = bool(ep_intro or ep_outro)
+
+        while True:
+            skip_text = "ON" if skip_intros else "OFF"
+            stream_choices = [
+                questionary.Choice(
+                    title=f"  {quality_icons.get(str(s.get('quality', '')).lower(), '🚀')}  {str(s.get('quality', 'Auto')).upper():<7} | {s.get('url', '')[:60]}",
+                    value=s
+                )
+                for s in streams
+            ]
+            if has_skip_data:
+                skip_parts = []
+                if ep_intro:
+                    skip_parts.append("Intro")
+                if ep_outro:
+                    skip_parts.append("Outro")
+                skip_label_str = " + ".join(skip_parts)
+                skip_status = "[green]ON[/green]" if skip_intros else "[red]OFF[/red]"
+                stream_choices.append(questionary.Separator())
+                stream_choices.append(questionary.Choice(
+                    f"  ⏭   Auto-Skip {skip_label_str}  [{skip_text}]",
+                    value="toggle_skip"
+                ))
+            stream_choices.append(questionary.Separator())
+            stream_choices.append(questionary.Choice("  🔙  Back to Episodes", value="back"))
+
+            selected_stream = questionary.select(
+                f"Select Quality (Ep {ep_num}):",
+                choices=stream_choices,
+                style=QSTYLE,
+            ).ask()
+
+            if selected_stream is None:
+                break
+            if selected_stream == "toggle_skip":
+                skip_intros = not skip_intros
+                import sys as _sys
+                _sys.stdout.write("\033c")
+                _sys.stdout.flush()
+                continue
+            if selected_stream == "back":
+                selected_stream = "back"
+            break
+
+        if selected_stream is None or selected_stream == "back":
             continue
             
         while True:
@@ -1363,12 +1462,18 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None,
                     start_time=resume_time,
                     provider=session_provider,
                     total_eps=len(ep_list) if ep_list else None,
-                    anime_meta=anime_meta
+                    anime_meta=anime_meta,
+                    intro=ep_intro if skip_intros else None,
+                    outro=ep_outro if skip_intros else None,
                 )
                 
                 # Check if this was the last episode
                 current_idx = next((i for i, e in enumerate(ep_list) if str(e.get('number')) == ep_num), -1)
-                is_last = (current_idx != -1 and current_idx + 1 == len(ep_list))
+                is_last_ep = (current_idx != -1 and current_idx + 1 == len(ep_list))
+                # Only treat as series finale if AniList confirms series is FINISHED
+                anilist_status = (anime_meta or {}).get("status", "")
+                series_finished = anilist_status == "FINISHED"
+                is_last = is_last_ep and series_finished
 
                 # 2. Final update based on duration threshold
                 if dur > 0:
@@ -1387,12 +1492,13 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None,
                         # Failed to load entirely or instant quit -> abort without marking completed
                         completed_ep = False
                         saved_resume = resume_time
-                    
+
+                # Only mark series "Completed" if this is the true finale of a finished series
                 if is_last and completed_ep:
                     ep_status = "Completed"
                 else:
                     ep_status = "Watching"
-                    
+
                 save_cache(t_str, anilist_id, session_provider, session_category, ep_num, total_eps=len(ep_list), status=ep_status, mark_watched=completed_ep, resume_time=saved_resume)
             
                 # --- Auto Next Logic ---
@@ -1495,6 +1601,8 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None,
                             try:
                                 watch_res = fetch_json(f"{API_BASE}/{selected_ep['id']}", ttl_hours=6)
                                 streams = watch_res.get("streams", [])
+                                ep_intro = watch_res.get("intro")
+                                ep_outro = watch_res.get("outro")
                                 if not streams:
                                     console.print("[red]❌ No streams found for next episode.[/red]")
                                     break
@@ -1509,11 +1617,16 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None,
                     else:
                         break
                 else:
-                    # End of series
+                    # Last available episode watched
                     console.print()
-                    console.rule("[bold green]🎉 SERIES COMPLETED! 🎉[/bold green]", style="bold green")
-                    console.print()
-                    console.print(Align.center("[dim]You have watched all available episodes of this series.[/dim]"))
+                    if series_finished:
+                        console.rule("[bold green]🎉 SERIES COMPLETED! 🎉[/bold green]", style="bold green")
+                        console.print()
+                        console.print(Align.center("[dim]You have watched all episodes of this series.[/dim]"))
+                    else:
+                        console.rule("[bold yellow]⏳ All Available Episodes Watched[/bold yellow]", style="yellow")
+                        console.print()
+                        console.print(Align.center("[dim]You're caught up! More episodes are coming.[/dim]"))
                     time.sleep(2.5)
                     break
 
