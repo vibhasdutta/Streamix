@@ -2,6 +2,7 @@ import time
 import threading
 import queue
 import os
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -25,12 +26,16 @@ class DiscordRPCManager:
             from core.config import load_config
             cfg = load_config()
             self.enabled = cfg.get("admin", {}).get("discord_rpc", True)
+            # whether to include external/stream-derived metadata (covers, thumbnails)
+            self.include_stream_metadata = cfg.get("admin", {}).get("discord_rpc_include_streaming_metadata", True)
         except Exception:
             self.enabled = True
 
         if self.enabled:
             self._connect_thread = threading.Thread(target=self._connection_loop, daemon=True)
             self._connect_thread.start()
+        # small in-memory cache for fetched media metadata (title, thumbnail)
+        self._meta_cache = {}  # url -> (timestamp, {"title":..., "thumbnail":...})
 
     def _connection_loop(self):
         try:
@@ -162,6 +167,64 @@ class DiscordRPCManager:
         text = " \u00b7 ".join(parts) if parts else "Streamix"
         return text[:128]
 
+    def _fetch_media_metadata(self, url):
+        """Try to fetch a human-friendly title and thumbnail for common stream URLs.
+
+        Returns a dict with keys 'title' and 'thumbnail' or None on failure.
+        Caches results for 1 hour.
+        """
+        if not url or not isinstance(url, str):
+            return None
+        now = time.time()
+        cached = self._meta_cache.get(url)
+        if cached and now - cached[0] < 3600:
+            return cached[1]
+
+        try:
+            parsed = urlparse(url)
+            host = parsed.netloc.lower()
+            # Try provider oEmbed endpoints for quick title extraction
+            import requests
+            meta = None
+            if 'youtube.com' in host or 'youtu.be' in host:
+                oe = f"https://www.youtube.com/oembed?url={requests.utils.requote_uri(url)}&format=json"
+                r = requests.get(oe, timeout=2)
+                if r.status_code == 200:
+                    j = r.json()
+                    meta = {"title": j.get('title'), "thumbnail": j.get('thumbnail_url')}
+            elif 'vimeo.com' in host:
+                oe = f"https://vimeo.com/api/oembed.json?url={requests.utils.requote_uri(url)}"
+                r = requests.get(oe, timeout=2)
+                if r.status_code == 200:
+                    j = r.json()
+                    meta = {"title": j.get('title'), "thumbnail": j.get('thumbnail_url')}
+
+            # Generic fallback: fetch HTML and look for og:title / og:image
+            if not meta:
+                r = requests.get(url, timeout=2, headers={"User-Agent": "streamix/1.0 (+https://example)"})
+                if r.status_code == 200 and r.text:
+                    html = r.text
+                    import re
+                    def og(tag):
+                        m = re.search(rf'<meta[^>]+property=["\']og:{tag}["\'][^>]*content=["\']([^"\']+)["\']', html, re.I)
+                        if m:
+                            return m.group(1)
+                        m = re.search(rf'<meta[^>]+name=["\']{tag}["\'][^>]*content=["\']([^"\']+)["\']', html, re.I)
+                        if m:
+                            return m.group(1)
+                        return None
+                    title = og('title') or og('site_name')
+                    thumb = og('image')
+                    if title or thumb:
+                        meta = {"title": title, "thumbnail": thumb}
+
+            if meta:
+                self._meta_cache[url] = (now, meta)
+                return meta
+        except Exception:
+            pass
+        return None
+
     def _format_timer(self, pos, dur):
         if pos is None or dur is None or dur <= 0 or pos < 0:
             return None
@@ -192,28 +255,111 @@ class DiscordRPCManager:
             party_size=[max(member_count, 1), party_max],
         )
 
-    def set_watching_solo(self, title, episode="1", total_eps=None, runtime_pos=None, runtime_duration=None, anime_meta=None):
-        ep_label = f"Ep {episode} / {total_eps}" if total_eps else f"Ep {episode}"
+    def set_watching_solo(self, title, episode="1", total_eps=None, runtime_pos=None, runtime_duration=None, anime_meta=None, media_url=None):
+        # Determine the state label: prefer episode info when available,
+        # but for stream URLs omit empty episode labels and show host/domain.
+        if episode and str(episode).strip():
+            ep_label = f"Ep {episode} / {total_eps}" if total_eps else f"Ep {episode}"
+        else:
+            if media_url and isinstance(media_url, str) and media_url.startswith("http"):
+                try:
+                    netloc = urlparse(media_url).netloc or "Streaming"
+                    ep_label = netloc
+                except Exception:
+                    ep_label = "Streaming"
+            else:
+                ep_label = ""
         cover = (anime_meta or {}).get("cover_url") or "icon_large"
+        # Respect admin setting: avoid sending external stream metadata if disabled
+        if media_url and isinstance(media_url, str):
+            try:
+                if media_url.startswith("http") and not self.include_stream_metadata:
+                    cover = "icon_large"
+                elif os.path.exists(media_url) and not anime_meta:
+                    # If playing a local file and no anime metadata available,
+                    # prefer using the parent folder name as the large_text so
+                    # it shows a meaningful title when thumbnails are missing.
+                    folder = os.path.basename(os.path.dirname(media_url))
+                    if folder:
+                        large_text = folder[:128]
+                    else:
+                        large_text = self._build_large_text(anime_meta)
+                else:
+                    large_text = self._build_large_text(anime_meta)
+            except Exception:
+                large_text = self._build_large_text(anime_meta)
+        else:
+            large_text = self._build_large_text(anime_meta)
+
         start_ts = (int(time.time()) - int(runtime_pos)) if runtime_pos is not None else self._session_start
+        # If ep_label is empty, don't include the parenthetical suffix.
+        state_text = f"{ep_label} (Solo)" if ep_label else "Solo"
+
+        # If we don't have anime metadata, try to fetch a stream title to show in
+        # the presence `details` (useful for YouTube links). This is cached.
+        details_text = f"Watching {title}"
+        if not anime_meta and media_url and self.include_stream_metadata:
+            try:
+                md = self._fetch_media_metadata(media_url)
+                if md and md.get('title'):
+                    details_text = md.get('title')
+                    # If we fetched a thumbnail and the CLI has an asset matching
+                    # that thumbnail key, developers can map it; otherwise Discord
+                    # will show the default image. We still send the thumbnail key
+                    # as `large_image` in case it's an asset name.
+                    if md.get('thumbnail'):
+                        cover = md.get('thumbnail')
+            except Exception:
+                pass
+
         self.update_presence(
-            details=f"Watching {title}",
-            state=f"{ep_label} (Solo)",
+            details=details_text,
+            state=state_text,
             large_image=cover,
-            large_text=self._build_large_text(anime_meta),
+            large_text=large_text,
             small_image="icon_play",
             small_text="Playing",
             start=start_ts,
         )
 
-    def set_watching_party(self, title, episode="1", total_eps=None, party_name="A Party", member_count=1, party_max=10, runtime_pos=None, runtime_duration=None, anime_meta=None, host_name=None):
-        ep_label = f"Ep {episode} / {total_eps}" if total_eps else f"Ep {episode}"
+    def set_watching_party(self, title, episode="1", total_eps=None, party_name="A Party", member_count=1, party_max=10, runtime_pos=None, runtime_duration=None, anime_meta=None, host_name=None, media_url=None):
+        if episode and str(episode).strip():
+            ep_label = f"Ep {episode} / {total_eps}" if total_eps else f"Ep {episode}"
+        else:
+            if media_url and isinstance(media_url, str) and media_url.startswith("http"):
+                try:
+                    netloc = urlparse(media_url).netloc or "Streaming"
+                    ep_label = netloc
+                except Exception:
+                    ep_label = "Streaming"
+            else:
+                ep_label = ""
         cover = (anime_meta or {}).get("cover_url") or "icon_large"
+        # Respect admin setting for external metadata
+        if media_url and isinstance(media_url, str):
+            try:
+                if media_url.startswith("http") and not self.include_stream_metadata:
+                    cover = "icon_large"
+            except Exception:
+                pass
         start_ts = (int(time.time()) - int(runtime_pos)) if runtime_pos is not None else self._session_start
         small = f"{party_name} · Host: {host_name}" if host_name else party_name
+        state_text = ep_label or "Watching"
+
+        details_text = f"Watching {title}"
+        if not anime_meta and media_url and self.include_stream_metadata:
+            try:
+                md = self._fetch_media_metadata(media_url)
+                if md and md.get('title'):
+                    details_text = md.get('title')
+                    if md.get('thumbnail'):
+                        cover = md.get('thumbnail')
+            except Exception:
+                pass
+
         self.update_presence(
-            details=f"Watching {title}",
-            state=ep_label,
+            details=details_text,
+            state=state_text,
             large_image=cover,
             large_text=self._build_large_text(anime_meta),
             small_image="icon_party",

@@ -464,6 +464,7 @@ class PartyClient:
                                 member_count=len(self.users) if self.users else 1,
                                 runtime_pos=client_time,
                                 host_name=self.host_name,
+                                media_url=url,
                             )
                             
                             # Only seek if we're out of sync by more than 0.8 seconds (tighter sync)

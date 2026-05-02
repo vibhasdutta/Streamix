@@ -639,7 +639,8 @@ def play_video(url, anime_title="Custom Playback", episode_num="", is_custom=Fal
                             total_eps=total_eps,
                             runtime_pos=last_pos,
                             runtime_duration=duration,
-                            anime_meta=anime_meta
+                            anime_meta=anime_meta,
+                            media_url=url
                         )
 
                 mpv_process.wait()
@@ -1905,8 +1906,27 @@ def main():
                 clean_path = c_path.strip("\"'")
                 if sub_choice in ["link", "live"] and not clean_path.startswith("http"): clean_path = "https://" + clean_path
                 
+                # For URL/live sources, allow the user to pick a quality constraint
+                selected_quality = None
+                if sub_choice in ["link", "live"]:
+                    q_choice = questionary.select(
+                        "Select Quality:",
+                        choices=[
+                            questionary.Choice("Auto (best)", value=None),
+                            questionary.Choice("1080p", value="1080"),
+                            questionary.Choice("720p", value="720"),
+                            questionary.Choice("480p", value="480"),
+                            questionary.Choice("360p", value="360"),
+                            questionary.Choice("Back", value="back")
+                        ],
+                        style=QSTYLE
+                    ).ask()
+                    if q_choice == "back" or q_choice is None:
+                        continue
+                    selected_quality = q_choice
+
                 with status_after("[yellow]Preparing playback[/yellow]", center=True): time.sleep(0.5)
-                play_video(clean_path, anime_title="Custom Playback", is_custom=True, is_live=is_live, ipc_server=ipc_server_path)
+                play_video(clean_path, anime_title="Custom Playback", is_custom=True, is_live=is_live, ipc_server=ipc_server_path, quality=selected_quality)
 
             elif choice == 'search':
                 sq_choices = [questionary.Choice(f"  🕒  {search_history[i]}", value=search_history[i]) for i in range(min(5, len(search_history)))]

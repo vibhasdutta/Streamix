@@ -778,6 +778,7 @@ class PartyAdminTUI:
                             runtime_duration=duration,
                             anime_meta=launch_state.get("anime_meta") if isinstance(launch_state, dict) else None,
                             host_name=self.host_name,
+                            media_url=payload.get("url")
                         )
                     elif not mpv_alive:
                         # Debounce transient IPC misses to avoid flapping client players.
