@@ -224,7 +224,12 @@ class PartyAdminTUI:
             self.voice_manager.mic_muted = self.mic_muted
             self.voice_manager.speaker_muted = self.speaker_muted
             self.voice_manager.start()
-            logger.info(f"[LIFECYCLE] Voice Manager started (Input Index: {mic_idx})")
+            if VoiceManager.is_audio_available():
+                logger.info(f"[LIFECYCLE] Voice Manager started (Input Index: {mic_idx})")
+            else:
+                reason = VoiceManager.audio_unavailable_reason()
+                logger.warning(f"[LIFECYCLE] Voice chat disabled: {reason}")
+                self._append_chat("System", f"Voice chat disabled: {reason}")
             
             self._append_chat("System", f"Joined room as host. Server: {self.room_url}")
             # Message loop

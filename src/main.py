@@ -1503,7 +1503,8 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None,
                 save_cache(t_str, anilist_id, session_provider, session_category, ep_num, total_eps=len(ep_list), status=ep_status, mark_watched=completed_ep, resume_time=saved_resume)
             
                 # --- Auto Next Logic ---
-                if not is_last:
+                has_next_available = (current_idx != -1 and current_idx + 1 < len(ep_list))
+                if has_next_available:
                     next_ep = ep_list[current_idx + 1]
                     next_num = str(next_ep.get('number'))
                     
@@ -1618,7 +1619,7 @@ def handle_episode_flow(anilist_id, t_str, pre_provider=None, pre_category=None,
                     else:
                         break
                 else:
-                    # Last available episode watched
+                    # Last available episode watched (or index not found safely)
                     console.print()
                     if series_finished:
                         console.rule("[bold green]🎉 SERIES COMPLETED! 🎉[/bold green]", style="bold green")

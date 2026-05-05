@@ -1,4 +1,9 @@
-import sounddevice as sd
+try:
+    import sounddevice as sd
+    _SOUNDDEVICE_ERROR = None
+except Exception as e:
+    sd = None
+    _SOUNDDEVICE_ERROR = e
 import numpy as np
 import threading
 import queue
@@ -8,7 +13,28 @@ from shared.utils.logger import setup_logger
 
 logger = setup_logger("voice_manager", "voice.log")
 
+
+def _portaudio_help_text() -> str:
+    if _SOUNDDEVICE_ERROR is None:
+        return ""
+    msg = str(_SOUNDDEVICE_ERROR)
+    if "PortAudio library not found" in msg:
+        return "Install PortAudio on Linux: sudo apt install libportaudio2 portaudio19-dev"
+    return f"Audio backend unavailable: {msg}"
+
+
+def _audio_available() -> bool:
+    return sd is not None
+
 class VoiceManager:
+    @staticmethod
+    def is_audio_available():
+        return _audio_available()
+
+    @staticmethod
+    def audio_unavailable_reason():
+        return _portaudio_help_text()
+
     def __init__(self, loop, sample_rate=24000, chunk_duration=0.04, input_device=None, output_device=None):
         """Voice Manager for Watch Party voice chat.
 
@@ -45,6 +71,10 @@ class VoiceManager:
         self._gate_hold_max = 5  # Hold gate open for N chunks after speech stops
 
     def start(self):
+        if not _audio_available():
+            logger.warning(f"Voice chat disabled: {_portaudio_help_text()}")
+            return
+
         # Microphone input
         try:
             self.input_stream = sd.InputStream(
@@ -146,6 +176,10 @@ class VoiceManager:
     @staticmethod
     def get_devices(kind='input'):
         """Return a filtered list of audio devices."""
+        if not _audio_available():
+            logger.warning(f"Cannot enumerate audio devices: {_portaudio_help_text()}")
+            return []
+
         devices = sd.query_devices()
         filtered = []
         for i, d in enumerate(devices):
@@ -157,6 +191,10 @@ class VoiceManager:
 
     def play_test_sound(self):
         """Play a short test tone on the selected output device."""
+        if not _audio_available():
+            print(f"[yellow]Audio test unavailable:[/yellow] {_portaudio_help_text()}")
+            return
+
         duration = 0.5
         f = 440
         t = np.linspace(0, duration, int(self.sample_rate * duration), False)
@@ -177,6 +215,10 @@ class VoiceManager:
             on_volume: Optional callback(rms_float) called every chunk with the
                        current mic RMS level (0.0 - 1.0).
         """
+        if not _audio_available():
+            logger.warning(f"Loopback unavailable: {_portaudio_help_text()}")
+            return
+
         loopback_queue = queue.Queue(maxsize=10)
         running = threading.Event()
         running.set()

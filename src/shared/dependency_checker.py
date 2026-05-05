@@ -72,6 +72,17 @@ _INSTALL_COMMANDS: dict[str, dict[OS, list[str]]] = {
             "Get token → https://dashboard.ngrok.com/get-started/your-authtoken",
         ],
     },
+    "portaudio": {
+        OS.WINDOWS: [],
+        OS.MACOS: [
+            "brew install portaudio",
+        ],
+        OS.LINUX: [
+            "sudo apt install libportaudio2 portaudio19-dev",
+            "sudo dnf install portaudio portaudio-devel",
+            "sudo pacman -S portaudio",
+        ],
+    },
 }
 
 
@@ -183,6 +194,23 @@ def _check_ngrok_authtoken() -> bool:
     return False
 
 
+def _check_portaudio_backend() -> bool:
+    """Return True if PortAudio backend is available for sounddevice.
+
+    This check is Linux-focused because missing PortAudio is the common
+    runtime issue there. Non-Linux platforms return True to avoid noisy
+    warnings for optional voice dependencies.
+    """
+    if not IS_LINUX:
+        return True
+
+    try:
+        import sounddevice as sd  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
 # ─────────────────────────────────────────────────────────────
 # Main checker
 # ─────────────────────────────────────────────────────────────
@@ -223,6 +251,13 @@ _DEP_CHECKS = [
         "check": _check_ngrok_authtoken,
         "hint": "Required for hosting public Watch Parties.",
         "key": "ngrok_auth",
+    },
+    {
+        "name": "PortAudio (voice backend)",
+        "label": "Voice Backend (PortAudio)",
+        "check": _check_portaudio_backend,
+        "hint": "Required for Watch Party voice chat on Linux.",
+        "key": "portaudio",
     },
 ]
 

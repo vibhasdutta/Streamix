@@ -82,6 +82,12 @@ Streamix is a **terminal-first streaming and watch party platform**. Host synchr
 
 3. Install and verify `mpv` and `ngrok` for your operating system using the links above.
 
+  Linux voice chat dependency (required for Watch Party voice):
+
+  ```bash
+  sudo apt install libportaudio2 portaudio19-dev
+  ```
+
 4. Add your ngrok auth token before starting a watch party.
 
 ### Ngrok Auth (Required for hosting Watch Parties)
